@@ -1,0 +1,32 @@
+[package]
+name = "linux-game-bar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gamebar"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+egui-wgpu.workspace = true
+wgpu.workspace = true
+gamebar-core.workspace = true
+silver-ui-kit.workspace = true
+smithay-client-toolkit = "0.21.1"
+wayland-client = { version = "0.31", features = ["system"] }
+raw-window-handle = "0.6"
+pollster = "0.4"
+crossbeam-channel = "0.5"
+pipewire = "0.9"
+ash = "0.38"
+libloading = "0.9"
+object = { version = "0.38", default-features = false, features = ["read", "elf"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
