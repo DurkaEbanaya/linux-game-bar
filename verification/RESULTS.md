@@ -107,3 +107,26 @@ systemd services restarted and report active/running without startup errors.
 The new HUD's graphical interaction, input passthrough and low-FPS accuracy have
 not received gameplay/visual acceptance; the previous working FPS counter does
 not establish those new behaviors.
+
+## Per-widget controls and Overwatch audio identity fix
+
+Added a native Painter pencil to every metric with independently saved background
+opacity and reading update interval (250/500 ms, 1/2/5/10 s). Each widget caches its
+own reading/frametime plot and schedules its deadline; FPS polling separated from
+the one-second resources sampler and runs at 250 ms. Existing layout JSON is
+compatible via defaults for added fields.
+
+Live read-only audio diagnosis found Overwatch node props omit application PID/name;
+the associated PipeWire Client owns them. Backend now subscribes to Clients and
+merges node/client identity, even when Client info arrives after Node discovery.
+Monitor/capture-sink nodes are filtered after full Node info (not only registry props).
+Active game's audio controls are placed immediately below its title in the panel.
+
+`cargo run --quiet --bin gamebar -- audio-list` returned exactly 3 Overwatch playback
+streams and 1 Overwatch capture stream, PID 88141/starttime 3311996, all controllable,
+volume 1.0 and unmuted. Their application key matches the sampled Wine application.
+This confirms discovery/association/writable Props, not an audible mute acceptance.
+No automated tests were run; actual audio was left at its original volume/mute.
+Format/check/clippy/release build passed on final sources. Updated binaries installed;
+panel restarted as transient user service and reports active/running. Installed
+`gamebar audio-list` confirms the same four controllable Overwatch streams.

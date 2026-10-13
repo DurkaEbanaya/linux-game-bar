@@ -50,9 +50,29 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        "audio-list" => {
+            let (commands, command_rx) = crossbeam_channel::bounded(8);
+            let (updates, update_rx) = crossbeam_channel::bounded(8);
+            audio::spawn(command_rx, updates);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut latest = None;
+            while std::time::Instant::now() < until {
+                if let Ok(update) = update_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    latest = Some(update);
+                }
+            }
+            let _ = commands.send(gamebar_core::Command::Shutdown);
+            let latest = latest.ok_or_else(|| anyhow::anyhow!("No PipeWire snapshot received"))?;
+            println!(
+                "{}\n{}",
+                latest.status,
+                serde_json::to_string_pretty(&latest.streams)?
+            );
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             println!(
-                "Linux Game Bar\n\n  gamebar run [--show]   Start background panel (KDE: Win+G)\n  gamebar toggle         Toggle panel (Hyprland/Sway key binding)\n  gamebar show|hide|quit  Control running panel\n  gamebar enable-fps     Authorize FPS hot-attach helper with pkexec"
+                "Linux Game Bar\n\n  gamebar run [--show]   Start background panel (KDE: Win+G)\n  gamebar toggle         Toggle panel (Hyprland/Sway key binding)\n  gamebar show|hide|quit  Control running panel\n  gamebar enable-fps     Authorize FPS hot-attach helper with pkexec\n  gamebar audio-list     Diagnose live per-app PipeWire streams"
             );
             Ok(())
         }

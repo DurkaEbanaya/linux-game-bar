@@ -52,6 +52,20 @@ struct WidgetLayout {
     visible: bool,
     position: [f32; 2],
     size: [f32; 2],
+    #[serde(default)]
+    opacity: Option<f32>,
+    #[serde(default = "default_update_ms")]
+    update_ms: u64,
+}
+fn default_update_ms() -> u64 {
+    1000
+}
+#[derive(Default)]
+struct WidgetReading {
+    value: String,
+    intervals: Vec<f64>,
+    frame_ms: Option<f64>,
+    p95_ms: Option<f64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -86,6 +100,8 @@ impl Default for Settings {
                 visible: i < 7,
                 position: [24. + (i % 4) as f32 * 195., 24. + (i / 4) as f32 * 100.],
                 size: [175., 65.],
+                opacity: None,
+                update_ms: default_update_ms(),
             })
             .collect();
         layouts.push(WidgetLayout {
@@ -93,6 +109,8 @@ impl Default for Settings {
             visible: true,
             position: [24., 235.],
             size: [740., 190.],
+            opacity: None,
+            update_ms: default_update_ms(),
         });
         Self {
             theme: Theme::default(),
@@ -118,6 +136,8 @@ pub struct Dashboard {
     pub suspend_hud: bool,
     commands: Sender<Command>,
     settings_dirty: Option<Instant>,
+    editing_widget: Option<usize>,
+    readings: Vec<Option<(Instant, WidgetReading)>>,
 }
 impl Dashboard {
     pub fn new(commands: Sender<Command>) -> Self {
@@ -132,10 +152,13 @@ impl Dashboard {
                     && s.opacity.is_finite()
                     && (0.1..=0.9).contains(&s.opacity)
                     && s.widgets.iter().all(|w| {
-                        w.position
-                            .iter()
-                            .chain(w.size.iter())
-                            .all(|v| v.is_finite() && v.abs() < 20000.)
+                        (250..=10000).contains(&w.update_ms)
+                            && w.opacity
+                                .is_none_or(|v| v.is_finite() && (0.0..=1.0).contains(&v))
+                            && w.position
+                                .iter()
+                                .chain(w.size.iter())
+                                .all(|v| v.is_finite() && v.abs() < 20000.)
                     })
             })
             .unwrap_or_default();
@@ -153,6 +176,8 @@ impl Dashboard {
             suspend_hud: false,
             commands,
             settings_dirty: None,
+            editing_widget: None,
+            readings: Vec::new(),
         }
     }
     fn send(&self, command: Command) {
@@ -164,6 +189,7 @@ impl Dashboard {
         if let Some(id) = active.pid.and_then(crate::metrics::process_id) {
             if self.selected != Some(id) {
                 self.selected = Some(id);
+                self.readings.clear();
                 self.send(Command::SelectProcess(Some(id)));
             }
         }
@@ -234,7 +260,7 @@ impl Dashboard {
                 ui.separator();
                 ui.menu_button("Виджеты и HUD…", |ui| {
                     ui.checkbox(&mut self.settings.hud, "Оставлять HUD поверх игры");
-                    ui.add(egui::Slider::new(&mut self.settings.opacity, 0.1..=0.9).text("Фон HUD"));
+                     ui.add(egui::Slider::new(&mut self.settings.opacity, 0.1..=0.9).text("Фон HUD по умолчанию"));
                     ui.add(egui::Slider::new(&mut self.zoom, 0.75..=1.5).step_by(0.05).text("Масштаб"));
                     egui::ComboBox::from_id_salt("theme").selected_text(t.theme_name).show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.settings.theme, Theme::ProDark, "Pro Dark");
@@ -244,7 +270,8 @@ impl Dashboard {
                     ui.separator();
                     for layout in &mut self.settings.widgets { ui.checkbox(&mut layout.visible, layout.widget.title()); }
                     if ui.button("Сбросить расположение").clicked() {
-                        self.settings.widgets = Settings::default().widgets;
+                         self.settings.widgets = Settings::default().widgets;
+                         self.readings.clear();
                         ctx.memory_mut(|m| *m = egui::Memory::default());
                     }
                 });
@@ -256,12 +283,38 @@ impl Dashboard {
         if self.tab == 0 {
             self.widgets(&ctx, rect, &t, false);
         }
+        if let Some(index) = self.editing_widget {
+            if let Some(layout) = self.settings.widgets.get_mut(index) {
+                let mut open = true;
+                egui::Window::new(format!("Настройка · {}", layout.widget.title()))
+                    .id(egui::Id::new("widget-settings")).open(&mut open).collapsible(false)
+                    .resizable(false).show(&ctx, |ui| {
+                        let mut opacity = layout.opacity.unwrap_or(self.settings.opacity);
+                        if ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("Непрозрачность фона")).changed() { layout.opacity = Some(opacity); }
+                        egui::ComboBox::from_id_salt("widget-refresh")
+                            .selected_text(format!("{} ms", layout.update_ms)).show_ui(ui, |ui| {
+                                for (ms, text) in [(250, "250 ms · 4 Hz"), (500, "500 ms · 2 Hz"), (1000, "1 s"), (2000, "2 s"), (5000, "5 s"), (10000, "10 s")] {
+                                    ui.selectable_value(&mut layout.update_ms, ms, text);
+                                }
+                            });
+                        ui.small("Обновляется только этот виджет. FPS измеряется каждые 250 ms, CPU/GPU/RAM — раз в секунду.");
+                        if ui.button("Использовать общий фон HUD").clicked() { layout.opacity = None; }
+                    });
+                if !open {
+                    self.editing_widget = None;
+                }
+            } else {
+                self.editing_widget = None;
+            }
+        }
         if old_zoom != self.zoom || before != serde_json::to_vec(&self.settings).unwrap_or_default()
         {
             self.settings_dirty = Some(Instant::now());
         }
     }
     fn widgets(&mut self, ctx: &egui::Context, screen: egui::Rect, t: &Tokens, hud: bool) {
+        self.readings
+            .resize_with(self.settings.widgets.len(), || None);
         for index in 0..self.settings.widgets.len() {
             let layout = self.settings.widgets[index].clone();
             if !layout.visible {
@@ -269,6 +322,16 @@ impl Dashboard {
             }
             let id = egui::Id::new(("metric-widget", index));
             let pos = egui::pos2(layout.position[0], layout.position[1]);
+            let now = Instant::now();
+            let interval = Duration::from_millis(layout.update_ms);
+            if self.readings[index]
+                .as_ref()
+                .is_none_or(|(time, _)| time.elapsed() >= interval)
+            {
+                self.readings[index] = Some((now, self.widget_reading(layout.widget)));
+            }
+            let (updated, reading) = self.readings[index].as_ref().unwrap();
+            ctx.request_repaint_after(interval.saturating_sub(updated.elapsed()));
             if hud {
                 egui::Area::new(id.with("hud"))
                     .fixed_pos(pos)
@@ -276,7 +339,7 @@ impl Dashboard {
                     .show(ctx, |ui| {
                         egui::Frame::new()
                             .fill(Color32::from_black_alpha(
-                                (self.settings.opacity * 255.) as u8,
+                                (layout.opacity.unwrap_or(self.settings.opacity) * 255.) as u8,
                             ))
                             .corner_radius(5)
                             .inner_margin(8.)
@@ -288,12 +351,17 @@ impl Dashboard {
                                         .small()
                                         .color(Color32::from_gray(200)),
                                 );
-                                self.widget_content(ui, layout.widget, t, true, layout.size[1]);
+                                widget_content(ui, layout.widget, reading, t, true, layout.size[1]);
                             });
                     });
             } else {
                 let mut open = true;
+                let mut frame = egui::Frame::window(&ctx.global_style());
+                if let Some(opacity) = layout.opacity {
+                    frame.fill = frame.fill.gamma_multiply(opacity);
+                }
                 let response = egui::Window::new(layout.widget.title())
+                    .frame(frame)
                     .id(id)
                     .open(&mut open)
                     .collapsible(false)
@@ -302,7 +370,42 @@ impl Dashboard {
                     .min_size(egui::vec2(140., 55.))
                     .constrain_to(screen)
                     .show(ctx, |ui| {
-                        self.widget_content(ui, layout.widget, t, false, layout.size[1])
+                        if matches!(layout.widget, Widget::FrameTime) {
+                            if icon_button(
+                                ui,
+                                t,
+                                Glyph::Pencil,
+                                self.editing_widget == Some(index),
+                                "Настроить прозрачность и обновление",
+                            )
+                            .clicked()
+                            {
+                                self.editing_widget = Some(index);
+                            }
+                            widget_content(ui, layout.widget, reading, t, false, layout.size[1]);
+                        } else {
+                            ui.horizontal(|ui| {
+                                widget_content(
+                                    ui,
+                                    layout.widget,
+                                    reading,
+                                    t,
+                                    false,
+                                    layout.size[1],
+                                );
+                                if icon_button(
+                                    ui,
+                                    t,
+                                    Glyph::Pencil,
+                                    self.editing_widget == Some(index),
+                                    "Настроить прозрачность и обновление",
+                                )
+                                .clicked()
+                                {
+                                    self.editing_widget = Some(index);
+                                }
+                            });
+                        }
                     });
                 let saved = &mut self.settings.widgets[index];
                 saved.visible = open;
@@ -316,7 +419,7 @@ impl Dashboard {
             }
         }
     }
-    fn widget_content(&self, ui: &mut Ui, widget: Widget, t: &Tokens, hud: bool, height: f32) {
+    fn widget_reading(&self, widget: Widget) -> WidgetReading {
         let fps = (self.snapshot.fps.process == self.selected).then_some(&self.snapshot.fps);
         let app = self.selected.and_then(|id| {
             self.snapshot
@@ -326,23 +429,12 @@ impl Dashboard {
         });
         let s = &self.snapshot.system;
         if matches!(widget, Widget::FrameTime) {
-            ui.label(format!(
-                "Среднее {} · p95 {}",
-                number(fps.and_then(|f| f.frame_ms), " ms"),
-                number(fps.and_then(|f| f.p95_ms), " ms")
-            ));
-            let graph_height = if hud {
-                height - 60.
-            } else {
-                ui.available_height()
+            return WidgetReading {
+                intervals: fps.map(|f| f.frame_times_ms.clone()).unwrap_or_default(),
+                frame_ms: fps.and_then(|f| f.frame_ms),
+                p95_ms: fps.and_then(|f| f.p95_ms),
+                ..Default::default()
             };
-            frame_plot(
-                ui,
-                fps.map(|f| f.frame_times_ms.as_slice()).unwrap_or(&[]),
-                graph_height.clamp(70., 400.),
-                t,
-            );
-            return;
         }
         let value = match widget {
             Widget::Fps => number(fps.and_then(|f| f.fps), ""),
@@ -369,11 +461,10 @@ impl Dashboard {
             ),
             Widget::FrameTime => unreachable!(),
         };
-        ui.label(
-            RichText::new(value)
-                .size(if hud { 22. } else { 25. })
-                .strong(),
-        );
+        WidgetReading {
+            value,
+            ..Default::default()
+        }
     }
     fn performance_controls(&mut self, ui: &mut Ui, t: &Tokens) {
         ui.label(
@@ -384,6 +475,18 @@ impl Dashboard {
             })
             .strong(),
         );
+        // Keep the game's controls immediately visible rather than below the metrics explanation.
+        if let Some(app) = self.selected.and_then(|id| {
+            self.snapshot
+                .applications
+                .iter()
+                .find(|a| a.processes.iter().any(|p| p.id == id))
+        }) {
+            ui.push_id("active-game-audio", |ui| {
+                self.audio_controls(ui, &self.audio_keys(app));
+            });
+            ui.separator();
+        }
         let helper = crate::fps::socket_path().exists();
         ui.horizontal(|ui| {
             if ui
@@ -673,6 +776,34 @@ fn settings_path() -> PathBuf {
             PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
         })
         .join("linux-game-bar/layout.json")
+}
+fn widget_content(
+    ui: &mut Ui,
+    widget: Widget,
+    reading: &WidgetReading,
+    t: &Tokens,
+    hud: bool,
+    height: f32,
+) {
+    if matches!(widget, Widget::FrameTime) {
+        ui.label(format!(
+            "Среднее {} · p95 {}",
+            number(reading.frame_ms, " ms"),
+            number(reading.p95_ms, " ms")
+        ));
+        let height = if hud {
+            height - 60.
+        } else {
+            ui.available_height()
+        };
+        frame_plot(ui, &reading.intervals, height.clamp(70., 400.), t);
+    } else {
+        ui.label(
+            RichText::new(&reading.value)
+                .size(if hud { 22. } else { 25. })
+                .strong(),
+        );
+    }
 }
 fn sort_value(a: &Application, sort: Sort) -> f64 {
     match sort {

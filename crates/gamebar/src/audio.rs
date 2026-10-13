@@ -27,10 +27,18 @@ struct Entry {
     channels: Vec<f32>,
     pending_policy: bool,
     props_ready: bool,
+    properties: HashMap<String, String>,
+    client_id: Option<u32>,
+}
+struct ClientEntry {
+    _client: pw::client::Client,
+    _listener: pw::client::ClientListener,
+    properties: HashMap<String, String>,
 }
 #[derive(Default)]
 struct State {
     nodes: HashMap<u32, Entry>,
+    clients: HashMap<u32, ClientEntry>,
     policies: HashMap<(String, Direction), Policy>,
     dirty: bool,
     errors: Vec<String>,
@@ -61,6 +69,7 @@ pub fn spawn(commands: Receiver<Command>, updates: Sender<AudioUpdate>) {
                             errors: vec![],
                         });
                         state.borrow_mut().nodes.clear();
+                        state.borrow_mut().clients.clear();
                         thread::sleep(Duration::from_secs(2));
                     }
                 }
@@ -75,7 +84,7 @@ fn run(
 ) -> anyhow::Result<bool> {
     let main_loop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&main_loop, None)?;
-    let core=context.connect_rc(Some(pw::properties::properties! {"application.name"=>"Linux Game Bar", "application.id"=>"io.github.DurkaEbanaya.GameBar"}))?;
+    let core=context.connect_rc(Some(pw::properties::properties! {"application.name"=>"Linux Game Bar", "application.id"=>"io.github.DurkaEbanaya.GameBar", "remote.intention"=>"manager"}))?;
     let weak = main_loop.downgrade();
     let errors = Rc::downgrade(&state);
     let _core_listener = core
@@ -100,6 +109,50 @@ fn run(
     let _registry_listener = registry
         .add_listener_local()
         .global(move |global| {
+            if global.type_ == pw::types::ObjectType::Client {
+                let (Some(registry), Some(state)) = (weak_registry.upgrade(), weak_state.upgrade())
+                else {
+                    return;
+                };
+                let Ok(client) = registry.bind::<pw::client::Client, _>(global) else {
+                    return;
+                };
+                let id = global.id;
+                let info_state = Rc::downgrade(&state);
+                let listener = client
+                    .add_listener_local()
+                    .info(move |info| {
+                        if let Some(state) = info_state.upgrade() {
+                            let mut state = state.borrow_mut();
+                            if let Some(client) = state.clients.get_mut(&id) {
+                                if let Some(props) = info.props() {
+                                    client.properties.extend(
+                                        props.iter().map(|(k, v)| (k.to_owned(), v.to_owned())),
+                                    );
+                                }
+                            }
+                            refresh_identities(&mut state);
+                        }
+                    })
+                    .register();
+                state.borrow_mut().clients.insert(
+                    id,
+                    ClientEntry {
+                        _client: client,
+                        _listener: listener,
+                        properties: global
+                            .props
+                            .as_ref()
+                            .map(|p| {
+                                p.iter()
+                                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    },
+                );
+                return;
+            }
             if global.type_ != pw::types::ObjectType::Node {
                 return;
             }
@@ -111,6 +164,11 @@ fn run(
                 Some("Stream/Input/Audio") => Direction::Capture,
                 _ => return,
             };
+            if props.get("stream.monitor") == Some("true")
+                || props.get("stream.capture.sink") == Some("true")
+            {
+                return;
+            }
             let (Some(registry), Some(state)) = (weak_registry.upgrade(), weak_state.upgrade())
             else {
                 return;
@@ -147,6 +205,15 @@ fn run(
                     if let Some(state) = info_state.upgrade() {
                         let mut state = state.borrow_mut();
                         if let Some(entry) = state.nodes.get_mut(&id) {
+                            if let Some(props) = info.props() {
+                                entry.properties.extend(
+                                    props.iter().map(|(k, v)| (k.to_owned(), v.to_owned())),
+                                );
+                                entry.client_id = entry
+                                    .properties
+                                    .get("client.id")
+                                    .and_then(|id| id.parse().ok());
+                            }
                             entry.stream.controllable = info.params().iter().any(|p| {
                                 p.id() == ParamType::Props
                                     && p.flags().contains(spa::param::ParamInfoFlags::WRITE)
@@ -157,6 +224,7 @@ fn run(
                                     .enum_params(0, Some(ParamType::Props), 0, u32::MAX);
                             }
                         }
+                        refresh_identities(&mut state);
                         state.dirty = true;
                     }
                 })
@@ -227,14 +295,21 @@ fn run(
                     channels: vec![],
                     pending_policy: true,
                     props_ready: false,
+                    properties: props
+                        .iter()
+                        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                        .collect(),
+                    client_id: props.get("client.id").and_then(|id| id.parse().ok()),
                 },
             );
+            refresh_identities(&mut state);
             state.dirty = true;
         })
         .global_remove(move |id| {
             if let Some(state) = removed_state.upgrade() {
                 let mut state = state.borrow_mut();
                 state.nodes.remove(&id);
+                state.clients.remove(&id);
                 state.dirty = true;
             }
         })
@@ -327,8 +402,25 @@ fn run(
         }
         if state.dirty {
             let update = AudioUpdate {
-                streams: state.nodes.values().map(|e| e.stream.clone()).collect(),
-                status: "PipeWire · subscribed".into(),
+                streams: state
+                    .nodes
+                    .values()
+                    .filter(|e| !is_monitor(e))
+                    .map(|e| e.stream.clone())
+                    .collect(),
+                status: format!(
+                    "PipeWire · {} playback / {} capture",
+                    state
+                        .nodes
+                        .values()
+                        .filter(|e| !is_monitor(e) && e.stream.direction == Direction::Playback)
+                        .count(),
+                    state
+                        .nodes
+                        .values()
+                        .filter(|e| !is_monitor(e) && e.stream.direction == Direction::Capture)
+                        .count()
+                ),
                 errors: state.errors.clone(),
             };
             if updates.try_send(update).is_ok() {
@@ -346,6 +438,54 @@ fn run(
     state.borrow_mut().dirty = true;
     main_loop.run();
     Ok(*shutdown.borrow())
+}
+fn is_monitor(entry: &Entry) -> bool {
+    entry
+        .properties
+        .get("stream.monitor")
+        .is_some_and(|v| v == "true")
+        || entry
+            .properties
+            .get("stream.capture.sink")
+            .is_some_and(|v| v == "true")
+}
+fn refresh_identities(state: &mut State) {
+    for entry in state.nodes.values_mut() {
+        let client = entry.client_id.and_then(|id| state.clients.get(&id));
+        let get = |key: &str| {
+            entry
+                .properties
+                .get(key)
+                .filter(|v| !v.is_empty())
+                .or_else(|| client.and_then(|c| c.properties.get(key)))
+        };
+        let pid = get("application.process.id").and_then(|p| p.parse::<u32>().ok());
+        let process = pid.and_then(metrics::process_id);
+        let name = get("application.name")
+            .or_else(|| get("node.description"))
+            .or_else(|| get("node.name"))
+            .cloned()
+            .unwrap_or_default();
+        let key = if let Some(pid) = pid {
+            metrics::identity(pid).0
+        } else {
+            format!(
+                "audio:{}:{}",
+                get("application.id").unwrap_or(&name),
+                entry.client_id.unwrap_or(entry.stream.id)
+            )
+        };
+        if entry.stream.app_key != key
+            || entry.stream.process != process
+            || entry.stream.name != name
+        {
+            entry.stream.app_key = key;
+            entry.stream.process = process;
+            entry.stream.name = name;
+            entry.pending_policy = true;
+            state.dirty = true;
+        }
+    }
 }
 fn apply(entry: &mut Entry, policy: &Policy) -> anyhow::Result<()> {
     anyhow::ensure!(

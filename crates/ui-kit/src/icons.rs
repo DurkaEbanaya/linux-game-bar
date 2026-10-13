@@ -9,6 +9,7 @@ pub enum Glyph {
     Close,
     Speaker,
     Microphone,
+    Pencil,
 }
 /// Original Painter strokes, on a 20×20 grid; no bitmap/brand assets.
 pub fn paint(ui: &Ui, rect: Rect, glyph: Glyph, color: Color32) {
@@ -26,6 +27,18 @@ pub fn paint(ui: &Ui, rect: Rect, glyph: Glyph, color: Color32) {
         ));
     };
     match glyph {
+        Glyph::Pencil => {
+            line(&[
+                (4., 12.),
+                (12., 4.),
+                (16., 8.),
+                (8., 16.),
+                (3., 17.),
+                (4., 12.),
+            ]);
+            line(&[(10., 6.), (14., 10.)]);
+            line(&[(4., 12.), (8., 16.)]);
+        }
         Glyph::Sliders => {
             for (y, x) in [(5., 7.), (10., 13.), (15., 9.)] {
                 line(&[(3., y), (17., y)]);

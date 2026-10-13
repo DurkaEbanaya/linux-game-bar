@@ -27,6 +27,7 @@ impl Backend {
                     ..Default::default()
                 };
                 let mut next_sample = Instant::now();
+                let mut next_fps = Instant::now();
                 let mut tracing = false;
                 let mut sent_revision = None;
                 let mut authorization: Option<(
@@ -37,7 +38,14 @@ impl Backend {
                 snapshot.fps.status =
                     "FPS не подключён. Откройте панель из игры и нажмите «Включить FPS».".into();
                 loop {
-                    if let Ok(command) = rx.recv_timeout(Duration::from_millis(100)) {
+                    let timeout = if tracing {
+                        next_fps
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_millis(100))
+                    } else {
+                        Duration::from_millis(100)
+                    };
+                    if let Ok(command) = rx.recv_timeout(timeout) {
                         let result: anyhow::Result<()> = match command {
                             Command::Shutdown => {
                                 let _ = audio_tx.send(Command::Shutdown);
@@ -169,23 +177,25 @@ impl Backend {
                         let (applications, system) = sampler.sample();
                         snapshot.applications = applications;
                         snapshot.system = system;
-                        if tracing {
-                            match fps::request(&FpsRequest::Status) {
-                                Ok(value) => {
-                                    tracing = value.process.is_some();
-                                    snapshot.fps = value
-                                }
-                                Err(e) => {
-                                    snapshot.fps = gamebar_core::FpsSnapshot {
-                                        process: snapshot.fps.process,
-                                        status: e.to_string(),
-                                        ..Default::default()
-                                    };
-                                }
+                        snapshot.revision += 1;
+                        next_sample = Instant::now() + Duration::from_secs(1);
+                    }
+                    if tracing && Instant::now() >= next_fps {
+                        match fps::request(&FpsRequest::Status) {
+                            Ok(value) => {
+                                tracing = value.process.is_some();
+                                snapshot.fps = value
+                            }
+                            Err(e) => {
+                                snapshot.fps = gamebar_core::FpsSnapshot {
+                                    process: snapshot.fps.process,
+                                    status: e.to_string(),
+                                    ..Default::default()
+                                };
                             }
                         }
                         snapshot.revision += 1;
-                        next_sample = Instant::now() + Duration::from_secs(1);
+                        next_fps = Instant::now() + Duration::from_millis(250);
                     }
                     if snapshot.errors.len() > 8 {
                         snapshot.errors.drain(..snapshot.errors.len() - 8);
