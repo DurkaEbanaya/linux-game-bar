@@ -206,3 +206,18 @@ interpolated value, persists. Automated tests/graphical acceptance not run.
 Final fmt/check/clippy/release build and shell syntax checks passed. Updated user
 binaries installed and panel restarted; user systemd unit active/running without
 startup errors. Existing FPS-helper protocol remains compatible (unchanged).
+
+## v0.1.4 live grid drag fix and square windows
+
+Previous snap corrected stored geometry after egui painted its own freely moving
+title bar; egui drag state could override it on the next frame. Metric windows now
+disable native movement/title bar and provide a draggable header with pencil/close.
+Pointer press origin captures a fixed offset. Before Window::show, pointer position
+minus offset is quantized to the grid and constrained to grid-aligned screen bounds;
+current_pos applies that position with no competing native drag. Collision settling
+remains on release. Resize uses the existing native handles. HUD transition cancels drag.
+All theme window corner radii and explicit HUD frame radius are zero.
+No automated tests or visual/gameplay acceptance run; compilation does not verify
+mouse interaction. The new pre-paint drag path replaces the flawed prior implementation.
+Final format/check/clippy/release build passed; updated panel installed and transient
+user service restarted active/running. FPS-helper protocol unchanged.

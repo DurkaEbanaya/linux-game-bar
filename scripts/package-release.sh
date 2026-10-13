@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(realpath "$(dirname "${BASH_SOURCE[0]}")/..")"
-version="${1:-0.1.3}"
+version="${1:-0.1.4}"
 name="linux-game-bar-${version}-linux-x86_64"
 mkdir -p "$root/dist/$name/bin" "$root/dist/$name/scripts"
 install -m 0755 "$root/target/release/gamebar" "$root/target/release/gamebar-fps-helper" "$root/dist/$name/bin/"

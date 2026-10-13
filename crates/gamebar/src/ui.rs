@@ -72,6 +72,11 @@ struct WidgetReading {
     p95_ms: Option<f64>,
     graph_status: Option<String>,
 }
+struct MetricDrag {
+    index: usize,
+    /// Pointer-to-window offset is captured once, so grid rounding never accumulates.
+    offset: egui::Vec2,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
@@ -169,6 +174,7 @@ pub struct Dashboard {
     frame_history: VecDeque<(f64, f64)>,
     history_identity: Option<(ProcessId, u64, u64)>,
     window_drag: Option<usize>,
+    metric_drag: Option<MetricDrag>,
     positions_pending: BTreeSet<usize>,
     layout_settled: bool,
     pub hud_suppressed: bool,
@@ -228,6 +234,7 @@ impl Dashboard {
             frame_history: VecDeque::new(),
             history_identity: None,
             window_drag: None,
+            metric_drag: None,
             positions_pending: BTreeSet::new(),
             layout_settled: false,
             hud_suppressed: false,
@@ -473,6 +480,47 @@ impl Dashboard {
         }
     }
     fn widgets(&mut self, ctx: &egui::Context, screen: egui::Rect, t: &Tokens, hud: bool) {
+        if hud {
+            self.metric_drag = None;
+            self.window_drag = None;
+        }
+        if !hud && let Some(drag) = &self.metric_drag {
+            let index = drag.index;
+            if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
+                let layout = &mut self.settings.widgets[index];
+                let mut position = pointer - drag.offset;
+                let size = egui::vec2(layout.size[0], layout.size[1]);
+                let maximum = screen.max - size;
+                if self.settings.grid_snap {
+                    let step = self.settings.grid_size;
+                    position.x = (position.x / step).round() * step;
+                    position.y = (position.y / step).round() * step;
+                    position.x = position.x.clamp(
+                        (screen.left() / step).ceil() * step,
+                        (maximum.x / step)
+                            .floor()
+                            .max((screen.left() / step).ceil())
+                            * step,
+                    );
+                    position.y = position.y.clamp(
+                        (screen.top() / step).ceil() * step,
+                        (maximum.y / step).floor().max((screen.top() / step).ceil()) * step,
+                    );
+                } else {
+                    position.x = position
+                        .x
+                        .clamp(screen.left(), maximum.x.max(screen.left()));
+                    position.y = position.y.clamp(screen.top(), maximum.y.max(screen.top()));
+                }
+                layout.position = [position.x, position.y];
+                self.positions_pending.insert(index);
+                self.settings_dirty = Some(Instant::now());
+            }
+            if !ctx.input(|i| i.pointer.primary_down()) {
+                self.metric_drag = None;
+                self.arrange_window(index, screen, true, ctx);
+            }
+        }
         self.readings
             .resize_with(self.settings.widgets.len(), || None);
         for index in 0..self.settings.widgets.len() {
@@ -506,7 +554,7 @@ impl Dashboard {
                             .fill(Color32::from_black_alpha(
                                 (layout.opacity.unwrap_or(self.settings.opacity) * 255.) as u8,
                             ))
-                            .corner_radius(5)
+                            .corner_radius(0)
                             .inner_margin(8.)
                             .show(ui, |ui| {
                                 ui.set_min_width(layout.size[0].max(140.) - 16.);
@@ -525,7 +573,8 @@ impl Dashboard {
                 let mut window = egui::Window::new(layout.widget.title())
                     .frame(frame)
                     .id(id)
-                    .open(&mut open)
+                    .title_bar(false)
+                    .movable(false)
                     .collapsible(false)
                     .default_pos(pos)
                     .default_size(egui::vec2(layout.size[0], layout.size[1]))
@@ -535,7 +584,33 @@ impl Dashboard {
                     window = window.current_pos(pos);
                 }
                 let response = window.show(ctx, |ui| {
-                    if matches!(layout.widget, Widget::FrameTime) {
+                    // Own the drag instead of correcting egui's free-moving title bar after paint.
+                    ui.horizontal(|ui| {
+                        let title = ui
+                            .add_sized(
+                                egui::vec2(
+                                    (ui.available_width()
+                                        - 2. * t.compact_height
+                                        - 2. * ui.spacing().item_spacing.x)
+                                        .max(65.),
+                                    t.compact_height,
+                                ),
+                                egui::Label::new(RichText::new(layout.widget.title()).strong())
+                                    .sense(egui::Sense::drag()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::Grab);
+                        if title.drag_started_by(egui::PointerButton::Primary)
+                            && let Some(start) = ui.input(|i| i.pointer.press_origin())
+                        {
+                            self.metric_drag = Some(MetricDrag {
+                                index,
+                                offset: start - pos,
+                            });
+                            self.window_drag = None;
+                        }
+                        if title.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
                         if icon_button(
                             ui,
                             t,
@@ -547,23 +622,13 @@ impl Dashboard {
                         {
                             self.editing_widget = Some(index);
                         }
-                        widget_content(ui, layout.widget, reading, t, false, layout.size[1]);
-                    } else {
-                        ui.horizontal(|ui| {
-                            widget_content(ui, layout.widget, reading, t, false, layout.size[1]);
-                            if icon_button(
-                                ui,
-                                t,
-                                Glyph::Pencil,
-                                self.editing_widget == Some(index),
-                                "Настроить прозрачность и обновление",
-                            )
-                            .clicked()
-                            {
-                                self.editing_widget = Some(index);
-                            }
-                        });
-                    }
+                        if icon_button(ui, t, Glyph::Close, false, "Скрыть метрику").clicked()
+                        {
+                            open = false;
+                        }
+                    });
+                    ui.separator();
+                    widget_content(ui, layout.widget, reading, t, false, layout.size[1]);
                 });
                 let saved = &mut self.settings.widgets[index];
                 saved.visible = open;
@@ -574,6 +639,7 @@ impl Dashboard {
                         .length()
                             > 0.5;
                     if moved
+                        && self.metric_drag.is_none()
                         && (self.settings.zoom - self.zoom).abs() < 0.0002
                         && ctx.input(|i| i.pointer.primary_down())
                     {
@@ -587,7 +653,7 @@ impl Dashboard {
                 }
             }
         }
-        if !hud {
+        if !hud && self.metric_drag.is_none() {
             if !self.layout_settled {
                 for index in 0..self.settings.widgets.len() {
                     if self.settings.widgets[index].visible {

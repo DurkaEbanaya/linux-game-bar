@@ -136,7 +136,7 @@ impl Tokens {
         ] {
             w.fg_stroke = Stroke::new(1., self.text);
         }
-        v.window_corner_radius = CornerRadius::same(self.radius);
+        v.window_corner_radius = CornerRadius::ZERO;
         v.window_shadow = self.shadow;
         style.visuals = v;
         style.spacing.item_spacing = egui::vec2(self.spacing, self.spacing);
