@@ -54,6 +54,7 @@ struct Overlay {
     quit: bool,
     start: Instant,
     modifiers: egui::Modifiers,
+    pointer_position: Option<(f64, f64)>,
 }
 pub fn run(show: bool) -> anyhow::Result<()> {
     let (control_tx, control_rx) = bounded(32);
@@ -86,6 +87,7 @@ pub fn run(show: bool) -> anyhow::Result<()> {
         quit: false,
         start: Instant::now(),
         modifiers: egui::Modifiers::default(),
+        pointer_position: None,
     };
     queue.roundtrip(&mut app)?;
     if show {
@@ -142,6 +144,23 @@ pub fn run(show: bool) -> anyhow::Result<()> {
         }
         app.dashboard.save(false);
         if app.layer.is_some() && app.configured && (app.dirty || Instant::now() >= repaint_at) {
+            let previous_zoom = app.dashboard.zoom;
+            let zoom_animating = app.dashboard.animate_zoom();
+            let ratio = previous_zoom / app.dashboard.zoom;
+            for event in &mut app.input.events {
+                match event {
+                    egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => {
+                        *pos *= ratio;
+                    }
+                    _ => {}
+                }
+            }
+            if zoom_animating && let Some((x, y)) = app.pointer_position {
+                app.input.events.push(egui::Event::PointerMoved(egui::pos2(
+                    x as f32 / app.dashboard.zoom,
+                    y as f32 / app.dashboard.zoom,
+                )));
+            }
             app.ctx.set_zoom_factor(app.dashboard.zoom);
             app.input.screen_rect = Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -166,11 +185,14 @@ pub fn run(show: bool) -> anyhow::Result<()> {
                     let _ = pointer.set_cursor(&conn, cursor);
                 }
             }
-            let delay = output
+            let mut delay = output
                 .viewport_output
                 .get(&egui::ViewportId::ROOT)
                 .map(|v| v.repaint_delay)
                 .unwrap_or(Duration::MAX);
+            if zoom_animating {
+                delay = delay.min(Duration::from_millis(16));
+            }
             repaint_at = Instant::now() + delay.min(Duration::from_secs(86400));
             if let Some(gpu) = &mut app.gpu {
                 if let Err(e) = gpu.draw(
@@ -271,6 +293,7 @@ impl Overlay {
         self.configured = false;
         self.dirty = true;
         self.input = egui::RawInput::default();
+        self.pointer_position = None;
         layer.commit();
         self.layer = Some(layer);
         self.menu = menu;
@@ -565,6 +588,7 @@ impl PointerHandler for Overlay {
                 event.position.0 as f32 / self.dashboard.zoom,
                 event.position.1 as f32 / self.dashboard.zoom,
             );
+            self.pointer_position = Some(event.position);
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     // Never inherit the game's hidden cursor. Set our own immediately on focus.
@@ -579,7 +603,10 @@ impl PointerHandler for Overlay {
                 PointerEventKind::Motion { .. } => {
                     self.input.events.push(egui::Event::PointerMoved(pos))
                 }
-                PointerEventKind::Leave { .. } => self.input.events.push(egui::Event::PointerGone),
+                PointerEventKind::Leave { .. } => {
+                    self.pointer_position = None;
+                    self.input.events.push(egui::Event::PointerGone);
+                }
                 PointerEventKind::Press { button, .. }
                 | PointerEventKind::Release { button, .. } => {
                     let button = match button {

@@ -189,3 +189,20 @@ counter deltas were legitimately zero during that sample (idle disk interval).
 No synthetic disk load, automated tests or visual acceptance performed.
 Final v0.1.2 fmt/check/clippy/release build and installer syntax checks passed.
 Updated binaries installed; user panel service restarted and reports active/running.
+
+## v0.1.3 grid / resources visibility / smooth zoom
+
+Added menu-only alignment grid, independent visible/snap settings, grid steps
+8/16/24/32/48/64 logical pixels and an align-all action. Snap/nearest-free candidates
+use grid coordinates; existing neighbour/screen snapping remains available without grid.
+Metrics rendered on both tabs. Removed forced resources window min-width 1000,
+so the existing horizontal table scroll avoids covering the metric workspace.
+
+Zoom target stored separately from displayed zoom; exponential time-based transition
+(rate 9/s, dt max50ms, epsilon0.0002) and 16ms repaint deadlines while changing.
+Removed 0.05 slider step. Pointer event coordinates and stationary pointer tracking
+rescaled to actual displayed zoom each animation frame. Target, not transient
+interpolated value, persists. Automated tests/graphical acceptance not run.
+Final fmt/check/clippy/release build and shell syntax checks passed. Updated user
+binaries installed and panel restarted; user systemd unit active/running without
+startup errors. Existing FPS-helper protocol remains compatible (unchanged).

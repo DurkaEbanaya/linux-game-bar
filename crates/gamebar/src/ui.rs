@@ -81,6 +81,9 @@ struct Settings {
     opacity: f32,
     widgets: Vec<WidgetLayout>,
     hud_shortcut: String,
+    grid_visible: bool,
+    grid_snap: bool,
+    grid_size: f32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -138,6 +141,9 @@ impl Default for Settings {
             opacity: 0.45,
             widgets: layouts,
             hud_shortcut: "Meta+Shift+G".into(),
+            grid_visible: true,
+            grid_snap: true,
+            grid_size: 16.,
         }
     }
 }
@@ -166,6 +172,7 @@ pub struct Dashboard {
     positions_pending: BTreeSet<usize>,
     layout_settled: bool,
     pub hud_suppressed: bool,
+    zoom_updated: Instant,
 }
 impl Dashboard {
     pub fn new(commands: Sender<Command>) -> Self {
@@ -177,6 +184,8 @@ impl Dashboard {
                 s.widgets.len() <= 32
                     && s.zoom.is_finite()
                     && (0.75..=1.5).contains(&s.zoom)
+                    && s.grid_size.is_finite()
+                    && (8.0..=64.0).contains(&s.grid_size)
                     && s.opacity.is_finite()
                     && (0.1..=0.9).contains(&s.opacity)
                     && s.widgets.iter().all(|w| {
@@ -222,6 +231,7 @@ impl Dashboard {
             positions_pending: BTreeSet::new(),
             layout_settled: false,
             hud_suppressed: false,
+            zoom_updated: Instant::now(),
         }
     }
     fn send(&self, command: Command) {
@@ -281,7 +291,6 @@ impl Dashboard {
         {
             return;
         }
-        self.settings.zoom = self.zoom;
         let path = settings_path();
         let result = (|| -> anyhow::Result<()> {
             std::fs::create_dir_all(path.parent().unwrap())?;
@@ -305,6 +314,21 @@ impl Dashboard {
             Theme::ModernDark => Tokens::modern_dark(),
         }
     }
+    pub fn animate_zoom(&mut self) -> bool {
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.zoom_updated)
+            .as_secs_f32()
+            .min(0.05);
+        self.zoom_updated = now;
+        let difference = self.settings.zoom - self.zoom;
+        if difference.abs() < 0.0002 {
+            self.zoom = self.settings.zoom;
+            return false;
+        }
+        self.zoom += difference * (1. - (-dt * 9.).exp());
+        true
+    }
     pub fn show(&mut self, root: &mut Ui, hud: bool) {
         let ctx = root.ctx().clone();
         let preview = self.preview && ctx.input(|i| i.pointer.primary_down());
@@ -320,9 +344,26 @@ impl Dashboard {
         } else {
             root.painter()
                 .rect_filled(rect, 0., Color32::from_black_alpha(100));
+            if self.settings.grid_visible {
+                let step = self.settings.grid_size;
+                let stroke = egui::Stroke::new(0.5, Color32::from_white_alpha(32));
+                for column in 0..=(rect.width() / step) as usize {
+                    let x = rect.left() + column as f32 * step;
+                    root.painter().line_segment(
+                        [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                        stroke,
+                    );
+                }
+                for row in 0..=(rect.height() / step) as usize {
+                    let y = rect.top() + row as f32 * step;
+                    root.painter().line_segment(
+                        [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                        stroke,
+                    );
+                }
+            }
         }
         let before = serde_json::to_vec(&self.settings).unwrap_or_default();
-        let old_zoom = self.zoom;
         if !preview {
             egui::Window::new("Linux Game Bar").id(egui::Id::new("dashboard"))
             .collapsible(false).default_pos(egui::pos2((rect.width() - 510.).max(20.), 25.))
@@ -344,7 +385,13 @@ impl Dashboard {
                      }
                      ui.small("Пример: Meta+Shift+G. Win+G открывает/закрывает меню.");
                      if ui.button("Общий фон HUD · предпросмотр…").clicked() { self.editing_global = true; self.editing_widget = None; }
-                    ui.add(egui::Slider::new(&mut self.zoom, 0.75..=1.5).step_by(0.05).text("Масштаб"));
+                    ui.add(egui::Slider::new(&mut self.settings.zoom, 0.75..=1.5).max_decimals(2).text("Масштаб"));
+                    ui.checkbox(&mut self.settings.grid_visible, "Показывать сетку в меню");
+                    ui.checkbox(&mut self.settings.grid_snap, "Привязка метрик к сетке");
+                    egui::ComboBox::from_id_salt("grid-size").selected_text(format!("Сетка {} px",self.settings.grid_size)).show_ui(ui, |ui| {
+                        for size in [8.,16.,24.,32.,48.,64.] { ui.selectable_value(&mut self.settings.grid_size,size,format!("{size:.0} px")); }
+                    });
+                    if ui.button("Выровнять все метрики").clicked() { self.layout_settled = false; }
                     egui::ComboBox::from_id_salt("theme").selected_text(t.theme_name).show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.settings.theme, Theme::ProDark, "Pro Dark");
                         ui.selectable_value(&mut self.settings.theme, Theme::StudioLight, "Studio Light");
@@ -367,9 +414,7 @@ impl Dashboard {
                 if self.tab == 0 { self.performance_controls(ui, &t); } else { self.resources(ui, &t); }
                 if let Some(error) = self.snapshot.errors.last() { ui.separator(); ui.colored_label(t.warning, error); }
             });
-            if self.tab == 0 {
-                self.widgets(&ctx, rect, &t, false);
-            }
+            self.widgets(&ctx, rect, &t, false);
         }
         self.preview = false;
         if let Some(index) = self.editing_widget {
@@ -420,8 +465,10 @@ impl Dashboard {
         if self.preview {
             ctx.request_repaint();
         }
-        if old_zoom != self.zoom || before != serde_json::to_vec(&self.settings).unwrap_or_default()
-        {
+        if (self.settings.zoom - self.zoom).abs() > 0.0002 {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+        if before != serde_json::to_vec(&self.settings).unwrap_or_default() {
             self.settings_dirty = Some(Instant::now());
         }
     }
@@ -526,7 +573,10 @@ impl Dashboard {
                             - egui::vec2(layout.size[0], layout.size[1]))
                         .length()
                             > 0.5;
-                    if moved && ctx.input(|i| i.pointer.primary_down()) {
+                    if moved
+                        && (self.settings.zoom - self.zoom).abs() < 0.0002
+                        && ctx.input(|i| i.pointer.primary_down())
+                    {
                         self.window_drag = Some(index);
                     }
                     saved.position = [response.response.rect.min.x, response.response.rect.min.y];
@@ -628,6 +678,14 @@ impl Dashboard {
             if dx.abs() <= snap { dx } else { 0. },
             if dy.abs() <= snap { dy } else { 0. },
         ));
+        if self.settings.grid_snap {
+            let step = self.settings.grid_size;
+            let position = egui::pos2(
+                (rect.left() / step).round() * step,
+                (rect.top() / step).round() * step,
+            );
+            rect = egui::Rect::from_min_size(position, rect.size());
+        }
         if settle {
             // Choose the nearest free position from screen edges and neighbours' edges.
             let mut xs = vec![
@@ -643,6 +701,19 @@ impl Dashboard {
             for other in &others {
                 xs.extend([other.left() - rect.width() - 8., other.right() + 8.]);
                 ys.extend([other.top() - rect.height() - 8., other.bottom() + 8.]);
+            }
+            if self.settings.grid_snap {
+                let step = self.settings.grid_size;
+                // Neighbour edges can fall between grid lines due to text-driven widths.
+                // Consider both sides, retaining the closest available grid-aligned candidate.
+                xs = xs
+                    .into_iter()
+                    .flat_map(|x| [(x / step).floor() * step, (x / step).ceil() * step])
+                    .collect();
+                ys = ys
+                    .into_iter()
+                    .flat_map(|y| [(y / step).floor() * step, (y / step).ceil() * step])
+                    .collect();
             }
             let mut best = None;
             for x in xs {
@@ -949,7 +1020,6 @@ impl Dashboard {
         }
     }
     fn resources(&mut self, ui: &mut Ui, t: &Tokens) {
-        ui.set_min_width(1000.);
         ui.horizontal_wrapped(|ui| {
             ui.label("Поиск");
             ui.text_edit_singleline(&mut self.filter);
