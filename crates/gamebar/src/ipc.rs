@@ -16,6 +16,7 @@ pub enum Control {
     Show,
     Hide,
     Quit,
+    ToggleHud,
 }
 pub fn runtime_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
@@ -61,6 +62,7 @@ pub fn listen(sender: Sender<Control>) -> anyhow::Result<UnixListener> {
                     "show" => Control::Show,
                     "hide" => Control::Hide,
                     "quit" => Control::Quit,
+                    "hud-toggle" => Control::ToggleHud,
                     _ => continue,
                 };
                 if sender.send(control).is_err() {

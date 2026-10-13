@@ -19,6 +19,9 @@ impl Bridge {
     fn toggle(&self) {
         let _ = self.control.try_send(Control::Toggle);
     }
+    fn toggle_hud(&self) {
+        let _ = self.control.try_send(Control::ToggleHud);
+    }
 }
 pub fn start(control: Sender<Control>) -> Receiver<ActiveWindow> {
     let (tx, rx) = bounded(32);
@@ -44,6 +47,9 @@ pub fn start(control: Sender<Control>) -> Receiver<ActiveWindow> {
                 if let Err(e) = load_kwin(&connection) {
                     eprintln!("KWin integration: {e}");
                 }
+            }
+            if let Err(e) = set_hud_shortcut(&crate::ui::saved_hud_shortcut()) {
+                eprintln!("HUD shortcut: {e}");
             }
             loop {
                 thread::park();
@@ -130,6 +136,92 @@ pub fn query_active(fallback: &ActiveWindow) -> ActiveWindow {
         }
     }
     fallback.clone()
+}
+pub fn set_hud_shortcut(shortcut: &str) -> anyhow::Result<()> {
+    let mut mods = 0i32;
+    let mut hypr = Vec::new();
+    let mut sway = Vec::new();
+    let parts: Vec<_> = shortcut.split('+').map(str::trim).collect();
+    anyhow::ensure!(!parts.is_empty(), "Empty HUD shortcut");
+    for part in &parts[..parts.len() - 1] {
+        match part.to_ascii_lowercase().as_str() {
+            "meta" | "super" | "win" => {
+                mods |= 0x10000000;
+                hypr.push("SUPER");
+                sway.push("Mod4");
+            }
+            "shift" => {
+                mods |= 0x02000000;
+                hypr.push("SHIFT");
+                sway.push("Shift");
+            }
+            "ctrl" | "control" => {
+                mods |= 0x04000000;
+                hypr.push("CTRL");
+                sway.push("Ctrl");
+            }
+            "alt" => {
+                mods |= 0x08000000;
+                hypr.push("ALT");
+                sway.push("Mod1");
+            }
+            _ => anyhow::bail!("Unknown shortcut modifier: {part}"),
+        }
+    }
+    let key = parts.last().unwrap().to_ascii_uppercase();
+    let code = if key.len() == 1 && key.as_bytes()[0].is_ascii_alphanumeric() {
+        key.as_bytes()[0] as i32
+    } else if let Some(number) = key
+        .strip_prefix('F')
+        .and_then(|n| n.parse::<i32>().ok())
+        .filter(|n| (1..=12).contains(n))
+    {
+        0x01000030 + number - 1
+    } else {
+        anyhow::bail!("Use A–Z, 0–9 or F1–F12 as HUD shortcut key");
+    };
+    anyhow::ensure!(
+        mods != 0 || key.starts_with('F'),
+        "HUD shortcut needs a modifier"
+    );
+    anyhow::ensure!(
+        mods | code != 0x10000000 | 'G' as i32,
+        "Win+G is reserved for the menu"
+    );
+    let exe = std::env::current_exe()?;
+    let command = format!("\"{}\" hud-toggle", exe.display());
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        let result = ProcessCommand::new("hyprctl")
+            .args([
+                "keyword",
+                "bind",
+                &format!("{},{key},exec,{command}", hypr.join(" ")),
+            ])
+            .output()?;
+        anyhow::ensure!(result.status.success(), "hyprctl binding failed");
+    } else if std::env::var_os("SWAYSOCK").is_some() {
+        sway.push(&key);
+        let result = ProcessCommand::new("swaymsg")
+            .arg(format!("bindsym {} exec {command}", sway.join("+")))
+            .output()?;
+        anyhow::ensure!(result.status.success(), "sway binding failed");
+    } else {
+        let conn = zbus::blocking::Connection::session()?;
+        let proxy = zbus::blocking::Proxy::new(
+            &conn,
+            "org.kde.kglobalaccel",
+            "/kglobalaccel",
+            "org.kde.KGlobalAccel",
+        )?;
+        let action = vec![
+            "kwin",
+            "LinuxGameBarHudToggle",
+            "KWin",
+            "Linux Game Bar: show/hide HUD",
+        ];
+        let _: () = proxy.call("setForeignShortcut", &(action, vec![mods | code]))?;
+    }
+    Ok(())
 }
 fn find_sway(v: &serde_json::Value, output: Option<String>) -> Option<ActiveWindow> {
     let output = if v["type"] == "output" {

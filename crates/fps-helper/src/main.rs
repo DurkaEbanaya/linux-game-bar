@@ -178,6 +178,7 @@ impl Trace {
                     .count()
             });
         let mut snapshot = FpsSnapshot {
+            sampled_at_ns: now,
             process: Some(self.process),
             source: self.source.clone(),
             lost,
@@ -244,6 +245,8 @@ impl Trace {
                     .collect();
                 snapshot.frame_times_ms =
                     intervals[intervals.len().saturating_sub(4096)..].to_vec();
+                snapshot.frame_timestamps_ns =
+                    times[times.len().saturating_sub(4096).max(1)..].to_vec();
                 intervals.sort_by(f64::total_cmp);
                 snapshot.p95_ms = intervals
                     .get((intervals.len() * 95 / 100).min(intervals.len() - 1))

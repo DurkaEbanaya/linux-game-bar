@@ -1,0 +1,38 @@
+# Linux Game Bar v0.1.0
+
+Первый публичный релиз нативной игровой панели для Linux Wayland.
+
+## Возможности
+
+- Win+G в KDE Plasma; интеграция Hyprland/Sway.
+- Перемещаемые и изменяемые по размеру метрики с прилипанием и сохранением раскладки.
+- Полупрозрачный click-through HUD в игре, отдельное сочетание Meta+Shift+G для его показа.
+- Индивидуальные прозрачность и частота обновления, живой предпросмотр фона HUD.
+- Present FPS без launch options Steam, AVG, 1% / 0,1% lows и непрерывный frametime graph.
+- CPU/GPU/RAM/VRAM/температуры, список ресурсоёмких приложений, завершение через pidfd.
+- Громкость, mute звука и микрофона рядом с приложениями; исправлена привязка Wine/Proton.
+
+## Установка
+
+Распакуйте `linux-game-bar-0.1.0-linux-x86_64.tar.gz`, затем:
+
+```sh
+bash scripts/install.sh --system-helper
+~/.local/bin/gamebar run
+```
+
+Для FPS откройте Win+G из игры и нажмите «Включить FPS» — авторизация helper через pkexec.
+Подробности, зависимости и compositor bindings находятся в README внутри архива.
+
+## Статус
+
+Бинарники: Linux x86_64, сборка openSUSE Tumbleweed с системными shared libraries.
+Для старых дистрибутивов предпочтительна сборка из исходников. Full source archive
+опубликован рядом с бинарным архивом; зафиксированные зависимости — Cargo.lock.
+
+Format, cargo check, clippy и release build проходят. Автоматизированные тесты по
+просьбе автора не запускались. Пользователь подтвердил рабочий FPS в Overwatch;
+последние UI refinements ещё не прошли полную игровую/визуальную приёмку.
+OpenGL, другие игры и Hyprland/Sway runtime acceptance остаются непроверенными.
+FPS — успешные present, не физически показанные кадры. Capture controls требуют
+writable Props потока. Известные ограничения перечислены в README.

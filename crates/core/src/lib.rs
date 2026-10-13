@@ -91,6 +91,9 @@ pub struct FpsSnapshot {
     pub statistics_frames: u64,
     /// Individual present intervals in chronological order (up to 4096, last 2 seconds).
     pub frame_times_ms: Vec<f64>,
+    /// End timestamps corresponding to frame_times_ms, CLOCK_MONOTONIC nanoseconds.
+    pub frame_timestamps_ns: Vec<u64>,
+    pub sampled_at_ns: u64,
     pub source: String,
     pub status: String,
     pub frames: u64,
@@ -145,6 +148,7 @@ pub enum Command {
     TraceFps(ProcessId),
     AuthorizeFps(ProcessId),
     StopFps,
+    SetHudShortcut(String),
     Terminate {
         processes: Vec<ProcessId>,
         force: bool,

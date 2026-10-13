@@ -12,7 +12,7 @@ mod ui;
 fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
     match args.get(1).map(String::as_str).unwrap_or("run") {
-        "toggle" | "show" | "hide" | "quit" => ipc::connect(&args[1]),
+        "toggle" | "show" | "hide" | "quit" | "hud-toggle" => ipc::connect(&args[1]),
         "run" => overlay::run(args.iter().any(|a| a == "--show")),
         "enable-fps" => {
             let status = fps::authorize()?;

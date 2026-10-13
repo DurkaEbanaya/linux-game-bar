@@ -2,14 +2,16 @@
 set -euo pipefail
 root="$(realpath "$(dirname "${BASH_SOURCE[0]}")/..")"
 prefix="${PREFIX:-$HOME/.local}"
+binary_dir="$root/target/release"
+if [[ -x "$root/bin/gamebar" ]]; then binary_dir="$root/bin"; fi
 for binary in gamebar gamebar-fps-helper; do
-  if [[ ! -x "$root/target/release/$binary" ]]; then
+  if [[ ! -x "$binary_dir/$binary" ]]; then
     printf 'Missing release binary: %s. Run cargo build --release --workspace first.\n' "$binary" >&2
     exit 1
   fi
 done
 install -d "$prefix/bin" "$prefix/share/applications"
-install -m 0755 "$root/target/release/gamebar" "$root/target/release/gamebar-fps-helper" "$prefix/bin/"
+install -m 0755 "$binary_dir/gamebar" "$binary_dir/gamebar-fps-helper" "$prefix/bin/"
 if [[ "$prefix" == *$'\n'* || "$prefix" == *'"'* || "$prefix" == *'%'* || "$prefix" == *'\\'* || "$prefix" == *'`'* || "$prefix" == *'$'* ]]; then
   printf 'Unsupported special characters in PREFIX for desktop Exec.\n' >&2
   exit 1
@@ -18,7 +20,7 @@ printf '[Desktop Entry]\nType=Application\nName=Linux Game Bar\nComment=Wayland 
 printf 'Installed to %s. Start: "%s/bin/gamebar" run\n' "$prefix" "$prefix"
 if [[ "${1:-}" == "--system-helper" ]]; then
   sudo install -d -m 0755 /usr/local/libexec
-  sudo install -o root -g root -m 0755 "$root/target/release/gamebar-fps-helper" /usr/local/libexec/gamebar-fps-helper
+  sudo install -o root -g root -m 0755 "$binary_dir/gamebar-fps-helper" /usr/local/libexec/gamebar-fps-helper
   if command -v restorecon >/dev/null 2>&1; then
     sudo restorecon /usr/local/libexec/gamebar-fps-helper
   fi

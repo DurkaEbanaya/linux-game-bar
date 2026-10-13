@@ -127,6 +127,9 @@ impl Backend {
                                 metrics::terminate(&processes, force)
                             }
                             Command::CloseWindow(window) => crate::desktop::close_window(&window),
+                            Command::SetHudShortcut(shortcut) => {
+                                crate::desktop::set_hud_shortcut(&shortcut)
+                            }
                         };
                         if let Err(error) = result {
                             snapshot.errors.push(error.to_string());

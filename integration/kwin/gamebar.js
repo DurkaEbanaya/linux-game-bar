@@ -14,3 +14,8 @@ registerShortcut("LinuxGameBarToggle", "Linux Game Bar: toggle overlay", "Meta+G
     callDBus("io.github.DurkaEbanaya.GameBar", "/io/github/DurkaEbanaya/GameBar",
         "io.github.DurkaEbanaya.GameBar", "Toggle");
 });
+registerShortcut("LinuxGameBarHudToggle", "Linux Game Bar: show/hide HUD", "Meta+Shift+G", function () {
+    publish(workspace.activeWindow);
+    callDBus("io.github.DurkaEbanaya.GameBar", "/io/github/DurkaEbanaya/GameBar",
+        "io.github.DurkaEbanaya.GameBar", "ToggleHud");
+});

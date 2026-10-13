@@ -130,3 +130,26 @@ No automated tests were run; actual audio was left at its original volume/mute.
 Format/check/clippy/release build passed on final sources. Updated binaries installed;
 panel restarted as transient user service and reports active/running. Installed
 `gamebar audio-list` confirms the same four controllable Overwatch streams.
+
+## v0.1.0 release refinements
+
+- Opacity applies only to in-game HUD. Holding opacity slider hides menu/dimming
+  and draws actual HUD with a small settings window; edit-mode windows stay opaque.
+- Frametime snapshots now include kernel monotonic end timestamps. UI deduplicates
+  overlapping snapshots into bounded history (12 s / 20000 samples), draws a fixed
+  10-second time axis with 650 ms delayed playhead, updates the scroll every 33 ms
+  and eases scale changes. Sample peaks remain measured min/max envelopes.
+- Metric windows snap to screen/neighbour edges within 12 logical points and choose
+  closest unoccupied candidate on release/resize when sufficient screen space exists.
+  Existing overlapping layouts are settled on opening; dashboard is an obstacle.
+- HUD visibility setting and separately assigned global shortcut (Meta+Shift+G by
+  default), CLI hud-toggle and KWin D-Bus integration. Hyprland/Sway native binds
+  applied through compositor commands. HUD recreation uses no keyboard/pointer focus.
+- Release archive includes both binaries, installer and documentation; full source
+  archive and checksum accompany binaries. Runtime compositor acceptance for these
+  latest interactions remains pending; no automated tests added/run.
+
+Final fmt/check/clippy/release build and shell syntax checks passed. Updated panel
+and system helper installed. Panel user service active/running with no startup
+errors. KDE KGlobalAccel reports HUD action bound to Qt key 301989959
+(Meta+Shift+G); this verifies registration, not keyboard gameplay acceptance.

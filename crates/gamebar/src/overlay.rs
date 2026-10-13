@@ -103,6 +103,16 @@ pub fn run(show: bool) -> anyhow::Result<()> {
         while let Ok(control) = control_rx.try_recv() {
             match control {
                 Control::Quit => app.quit = true,
+                Control::ToggleHud => {
+                    app.dashboard.hud_suppressed = !app.dashboard.hud_suppressed;
+                    if !app.menu {
+                        if app.dashboard.hud_enabled() {
+                            app.create_layer(&conn, &qh, false)?;
+                        } else {
+                            app.destroy();
+                        }
+                    }
+                }
                 Control::Hide => app.return_to_game()?,
                 Control::Show if !app.menu => app.show(&conn, &qh, &active_rx)?,
                 Control::Toggle => {
@@ -218,6 +228,14 @@ impl Overlay {
         }
         self.dashboard
             .select_active(crate::desktop::query_active(&self.dashboard.active));
+        self.create_layer(conn, qh, true)
+    }
+    fn create_layer(
+        &mut self,
+        conn: &Connection,
+        qh: &QueueHandle<Self>,
+        menu: bool,
+    ) -> anyhow::Result<()> {
         self.destroy();
         let output = self.outputs.outputs().find(|output| {
             self.outputs
@@ -235,7 +253,15 @@ impl Overlay {
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
         layer.set_size(0, 0);
         layer.set_exclusive_zone(-1);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        layer.set_keyboard_interactivity(if menu {
+            KeyboardInteractivity::Exclusive
+        } else {
+            KeyboardInteractivity::None
+        });
+        if !menu {
+            let region = Region::new(&self.compositor)?;
+            layer.set_input_region(Some(region.wl_region()));
+        }
         let memory = self.ctx.memory(Clone::clone);
         self.ctx = egui::Context::default();
         self.ctx.memory_mut(|m| *m = memory);
@@ -247,7 +273,7 @@ impl Overlay {
         self.input = egui::RawInput::default();
         layer.commit();
         self.layer = Some(layer);
-        self.menu = true;
+        self.menu = menu;
         Ok(())
     }
     fn return_to_game(&mut self) -> anyhow::Result<()> {
