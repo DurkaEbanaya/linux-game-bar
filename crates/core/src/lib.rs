@@ -20,6 +20,8 @@ pub struct Process {
     pub gpu_percent: Option<f64>,
     pub vram_bytes: Option<u64>,
     pub io_bytes_per_sec: Option<f64>,
+    pub disk_read_bytes_per_sec: Option<f64>,
+    pub disk_write_bytes_per_sec: Option<f64>,
     pub owned: bool,
 }
 
@@ -33,6 +35,8 @@ pub struct Application {
     pub gpu_percent: Option<f64>,
     pub vram_bytes: Option<u64>,
     pub io_bytes_per_sec: Option<f64>,
+    pub disk_read_bytes_per_sec: Option<f64>,
+    pub disk_write_bytes_per_sec: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -65,6 +69,8 @@ pub struct SystemMetrics {
     pub vram_used: Option<u64>,
     pub vram_total: Option<u64>,
     pub cpu_temperature: Option<f64>,
+    pub disk_read_bytes_per_sec: Option<f64>,
+    pub disk_write_bytes_per_sec: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

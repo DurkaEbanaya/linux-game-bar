@@ -168,3 +168,24 @@ hot-attached to Overwatch PID 88141. Live response: FPS 193.02836796185963,
 Added explicit old-helper warning inside Frametime instead of silent blank plot;
 documented helper restart during upgrade. Workspace version now 0.1.1.
 Fmt/check/clippy/release build passed; no automated tests or visual acceptance run.
+
+## CPU/GPU scale and disk throughput widgets
+
+CPU process/application uses host online logical CPU count: normalized to 0–100%.
+GPU aggregates unique clients per device/engine before taking the busiest engine,
+bounded to 0–100%; process and system readings likewise bounded. No missing metric
+is converted to zero; GPU remains an fdinfo estimate rather than hardware occupancy.
+
+Separate read/write deltas from /proc/PID/io populate application throughput.
+System throughput samples /proc/diskstats whole physical devices with /sys/block/NAME/device,
+excluding partitions and virtual stacked devices, sectors fixed at kernel-defined 512 bytes.
+New AppDisk and SystemDisk widgets default visible, have individual HUD opacity/refresh
+controls and are merged into older saved layouts without resetting user positions.
+Resources I/O tooltip breaks down reads/writes. metrics-status [PID] provides diagnostics.
+
+Fmt/check/clippy/release build passed. Live read-only metrics-status 88141 returned
+Overwatch CPU 6.7808%, GPU 63.3088%; system CPU 11.8186%, GPU 84%. Read and write
+counter deltas were legitimately zero during that sample (idle disk interval).
+No synthetic disk load, automated tests or visual acceptance performed.
+Final v0.1.2 fmt/check/clippy/release build and installer syntax checks passed.
+Updated binaries installed; user panel service restarted and reports active/running.

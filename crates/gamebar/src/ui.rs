@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Widget {
     Fps,
     Average,
@@ -26,6 +26,8 @@ enum Widget {
     SystemRam,
     Temperature,
     Vram,
+    AppDisk,
+    SystemDisk,
 }
 impl Widget {
     fn title(self) -> &'static str {
@@ -43,6 +45,8 @@ impl Widget {
             Self::SystemRam => "RAM системы",
             Self::Temperature => "Температуры системы",
             Self::Vram => "VRAM системы",
+            Self::AppDisk => "Диск приложения · чтение / запись",
+            Self::SystemDisk => "Диски системы · чтение / запись",
         }
     }
 }
@@ -114,6 +118,19 @@ impl Default for Settings {
             opacity: None,
             update_ms: default_update_ms(),
         });
+        for (widget, y, visible) in [
+            (Widget::AppDisk, 455., true),
+            (Widget::SystemDisk, 565., true),
+        ] {
+            layouts.push(WidgetLayout {
+                widget,
+                visible,
+                position: [24., y],
+                size: [330., 90.],
+                opacity: None,
+                update_ms: default_update_ms(),
+            });
+        }
         Self {
             theme: Theme::default(),
             zoom: 1.,
@@ -152,7 +169,7 @@ pub struct Dashboard {
 }
 impl Dashboard {
     pub fn new(commands: Sender<Command>) -> Self {
-        let settings = std::fs::read(settings_path())
+        let mut settings = std::fs::read(settings_path())
             .ok()
             .filter(|b| b.len() <= 65536)
             .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
@@ -173,6 +190,14 @@ impl Dashboard {
                     })
             })
             .unwrap_or_default();
+        // Merge newly added widgets without overwriting the user's existing layout.
+        let mut migrated = false;
+        for layout in Settings::default().widgets {
+            if !settings.widgets.iter().any(|w| w.widget == layout.widget) {
+                settings.widgets.push(layout);
+                migrated = true;
+            }
+        }
         Self {
             snapshot: Snapshot::default(),
             selected: None,
@@ -186,7 +211,7 @@ impl Dashboard {
             hide: false,
             suspend_hud: false,
             commands,
-            settings_dirty: None,
+            settings_dirty: migrated.then(Instant::now),
             editing_widget: None,
             readings: Vec::new(),
             preview: false,
@@ -698,6 +723,16 @@ impl Dashboard {
                 s.vram_used.map(bytes).unwrap_or_else(|| "—".into()),
                 s.vram_total.map(bytes).unwrap_or_else(|| "—".into())
             ),
+            Widget::AppDisk => format!(
+                "Чтение {}\nЗапись {}",
+                rate(app.and_then(|a| a.disk_read_bytes_per_sec)),
+                rate(app.and_then(|a| a.disk_write_bytes_per_sec))
+            ),
+            Widget::SystemDisk => format!(
+                "Чтение {}\nЗапись {}",
+                rate(s.disk_read_bytes_per_sec),
+                rate(s.disk_write_bytes_per_sec)
+            ),
             Widget::FrameTime => unreachable!(),
         };
         WidgetReading {
@@ -970,15 +1005,23 @@ impl Dashboard {
                                 .collect::<Vec<_>>()
                                 .join("\n"),
                         );
-                        ui.label(number(app.cpu_percent, "%"));
+                        ui.label(number(app.cpu_percent, "%"))
+                            .on_hover_text("100% = все логические CPU системы");
                         ui.label(bytes(app.memory_bytes));
-                        ui.label(number(app.gpu_percent, "%"));
+                        ui.label(number(app.gpu_percent, "%")).on_hover_text(
+                            "Самый занятый DRM engine приложения, шкала 0–100%; оценка по fdinfo",
+                        );
                         ui.label(app.vram_bytes.map(bytes).unwrap_or_else(|| "—".into()));
                         ui.label(
                             app.io_bytes_per_sec
                                 .map(|v| format!("{}/s", bytes(v as u64)))
                                 .unwrap_or_else(|| "—".into()),
-                        );
+                        )
+                        .on_hover_text(format!(
+                            "Чтение {}\nЗапись {}",
+                            rate(app.disk_read_bytes_per_sec),
+                            rate(app.disk_write_bytes_per_sec)
+                        ));
                         ui.push_id((&app.key, "audio"), |ui| {
                             ui.vertical(|ui| self.audio_controls(ui, &self.audio_keys(&app)));
                         });
@@ -1159,6 +1202,19 @@ fn frame_plot(ui: &mut Ui, values: &[(f64, f64)], height: f32, t: &Tokens) {
 fn number(value: Option<f64>, unit: &str) -> String {
     value
         .map(|v| format!("{v:.1}{unit}"))
+        .unwrap_or_else(|| "—".into())
+}
+fn rate(value: Option<f64>) -> String {
+    value
+        .map(|v| {
+            if v >= 1048576. {
+                format!("{:.1} MiB/s", v / 1048576.)
+            } else if v >= 1024. {
+                format!("{:.1} KiB/s", v / 1024.)
+            } else {
+                format!("{v:.0} B/s")
+            }
+        })
         .unwrap_or_else(|| "—".into())
 }
 fn bytes(value: u64) -> String {

@@ -60,7 +60,8 @@ pub fn identity(pid: u32) -> (String, String, String) {
 #[derive(Default, Clone)]
 struct Counters {
     ticks: u64,
-    io: Option<u64>,
+    read_bytes: Option<u64>,
+    write_bytes: Option<u64>,
 }
 #[derive(Default, Clone)]
 struct DrmClient {
@@ -75,6 +76,7 @@ pub struct Sampler {
     total_cpu: Option<(u64, u64)>,
     ticks_per_sec: f64,
     page_size: u64,
+    previous_disks: HashMap<String, (u64, u64)>,
     pub selected: Option<ProcessId>,
 }
 impl Sampler {
@@ -87,11 +89,14 @@ impl Sampler {
             ticks_per_sec: unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64,
             page_size: unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64,
             selected: None,
+            previous_disks: HashMap::new(),
         }
     }
     pub fn sample(&mut self) -> (Vec<Application>, SystemMetrics) {
         let now = Instant::now();
         let dt = now.duration_since(self.time).as_secs_f64().max(0.001);
+        // Host-wide scale, like system CPU: 100% means all online logical CPUs.
+        let cpu_count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }.max(1) as f64;
         let mut next = HashMap::new();
         let mut next_drm = HashMap::new();
         let mut groups: HashMap<String, Application> = HashMap::new();
@@ -122,41 +127,40 @@ impl Sampler {
                     start_ticks: parse(19),
                 };
                 let ticks = parse(11) + parse(12);
-                let io: Option<u64> = fs::read_to_string(path.join("io")).ok().map(|s| {
-                    s.lines()
-                        .filter(|l| l.starts_with("read_bytes:") || l.starts_with("write_bytes:"))
-                        .filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-                        .sum()
-                });
+                let io = fs::read_to_string(path.join("io")).ok();
+                let counter = |name: &str| {
+                    io.as_ref()?
+                        .lines()
+                        .find_map(|l| l.strip_prefix(name)?.trim().parse::<u64>().ok())
+                };
+                let read_bytes = counter("read_bytes:");
+                let write_bytes = counter("write_bytes:");
                 let prev = self.previous.get(&id);
-                let cpu = prev
-                    .and_then(|p| ticks.checked_sub(p.ticks))
-                    .map(|v| v as f64 / self.ticks_per_sec / dt * 100.);
-                let io_rate = prev
-                    .and_then(|p| io?.checked_sub(p.io?))
+                let cpu = prev.and_then(|p| ticks.checked_sub(p.ticks)).map(|v| {
+                    (v as f64 / self.ticks_per_sec / dt / cpu_count * 100.).clamp(0., 100.)
+                });
+                let read_rate = prev
+                    .and_then(|p| read_bytes?.checked_sub(p.read_bytes?))
                     .map(|v| v as f64 / dt);
-                next.insert(id, Counters { ticks, io });
+                let write_rate = prev
+                    .and_then(|p| write_bytes?.checked_sub(p.write_bytes?))
+                    .map(|v| v as f64 / dt);
+                let io_rate = read_rate.zip(write_rate).map(|(r, w)| r + w);
+                next.insert(
+                    id,
+                    Counters {
+                        ticks,
+                        read_bytes,
+                        write_bytes,
+                    },
+                );
                 let (key, name, exe) = identity(pid);
                 let clients = drm_clients(pid);
-                let mut gpu = None;
+                let mut process_engines: HashMap<String, f64> = HashMap::new();
                 let mut vram = None;
                 for (client, counters) in &clients {
                     if let Some(old) = self.previous_drm.get(client) {
-                        let busy = counters
-                            .engines
-                            .iter()
-                            .filter_map(|(engine, (value, capacity))| {
-                                let old = old.engines.get(engine)?.0;
-                                Some(
-                                    value.checked_sub(old)? as f64
-                                        / (dt * 1e9 * (*capacity).max(1) as f64)
-                                        * 100.,
-                                )
-                            })
-                            .fold(None, |acc: Option<f64>, value| {
-                                Some(acc.unwrap_or(0.).max(value))
-                            });
-                        gpu = sum_option(gpu, busy);
+                        add_engine_load(&mut process_engines, client, counters, old, dt);
                     }
                     vram = sum_option(vram, counters.vram);
                     group_clients
@@ -173,9 +177,14 @@ impl Sampler {
                     app_key: key.clone(),
                     cpu_percent: cpu,
                     memory_bytes: parse(21) * self.page_size,
-                    gpu_percent: gpu,
+                    gpu_percent: process_engines
+                        .into_values()
+                        .reduce(f64::max)
+                        .map(|v| v.clamp(0., 100.)),
                     vram_bytes: vram,
                     io_bytes_per_sec: io_rate,
+                    disk_read_bytes_per_sec: read_rate,
+                    disk_write_bytes_per_sec: write_rate,
                     owned: fs::metadata(&path)
                         .map(|m| m.uid() == unsafe { libc::getuid() })
                         .unwrap_or(false),
@@ -188,33 +197,36 @@ impl Sampler {
                 group.cpu_percent = sum_option(group.cpu_percent, cpu);
                 group.memory_bytes += process.memory_bytes;
                 group.io_bytes_per_sec = sum_option(group.io_bytes_per_sec, io_rate);
+                group.disk_read_bytes_per_sec =
+                    sum_option(group.disk_read_bytes_per_sec, read_rate);
+                group.disk_write_bytes_per_sec =
+                    sum_option(group.disk_write_bytes_per_sec, write_rate);
                 group.processes.push(process);
             }
         }
         // Shared DRM clients may occur through duplicated/inherited file descriptors: count once per app.
         for (key, clients) in group_clients {
             if let Some(group) = groups.get_mut(&key) {
+                let mut engine_totals: HashMap<String, f64> = HashMap::new();
                 for client in clients {
                     let Some(current) = next_drm.get(&client) else {
                         continue;
                     };
                     group.vram_bytes = sum_option(group.vram_bytes, current.vram);
                     if let Some(old) = self.previous_drm.get(&client) {
-                        let busy = current
-                            .engines
-                            .iter()
-                            .filter_map(|(e, (v, c))| {
-                                Some(
-                                    v.checked_sub(old.engines.get(e)?.0)? as f64
-                                        / (dt * 1e9 * (*c).max(1) as f64)
-                                        * 100.,
-                                )
-                            })
-                            .fold(None, |a: Option<f64>, v| Some(a.unwrap_or(0.).max(v)));
-                        group.gpu_percent = sum_option(group.gpu_percent, busy);
+                        add_engine_load(&mut engine_totals, &client, current, old, dt);
                     }
                 }
+                // Sum clients on the SAME engine before taking the busiest engine.
+                // Concurrent engines/contexts are not additive whole-device occupancy.
+                group.gpu_percent = engine_totals
+                    .into_values()
+                    .reduce(f64::max)
+                    .map(|v| v.clamp(0., 100.));
             }
+        }
+        for group in groups.values_mut() {
+            group.cpu_percent = group.cpu_percent.map(|v| v.clamp(0., 100.));
         }
         self.previous = next;
         self.previous_drm = next_drm;
@@ -225,7 +237,39 @@ impl Sampler {
                 .unwrap_or(0.)
                 .total_cmp(&a.cpu_percent.unwrap_or(0.))
         });
-        (apps, self.system())
+        let mut system = self.system();
+        let mut disks = HashMap::new();
+        if let Ok(stats) = fs::read_to_string("/proc/diskstats") {
+            for line in stats.lines() {
+                let f: Vec<_> = line.split_whitespace().collect();
+                if f.len() < 10
+                    || !std::path::Path::new("/sys/block")
+                        .join(f[2])
+                        .join("device")
+                        .exists()
+                {
+                    continue;
+                }
+                let (Ok(read), Ok(write)) = (f[5].parse::<u64>(), f[9].parse::<u64>()) else {
+                    continue;
+                };
+                if let Some((old_read, old_write)) = self.previous_disks.get(f[2]) {
+                    system.disk_read_bytes_per_sec = sum_option(
+                        system.disk_read_bytes_per_sec,
+                        read.checked_sub(*old_read).map(|v| v as f64 * 512. / dt),
+                    );
+                    system.disk_write_bytes_per_sec = sum_option(
+                        system.disk_write_bytes_per_sec,
+                        write.checked_sub(*old_write).map(|v| v as f64 * 512. / dt),
+                    );
+                }
+                disks.insert(f[2].to_owned(), (read, write));
+            }
+            self.previous_disks = disks;
+        } else {
+            self.previous_disks.clear();
+        }
+        (apps, system)
     }
     fn system(&mut self) -> SystemMetrics {
         let mut out = SystemMetrics::default();
@@ -285,7 +329,7 @@ impl Sampler {
                     .ok()
                     .map(|s| s.trim().to_owned())
                     .or(Some(name));
-                out.gpu_percent = busy.map(|v| v as f64);
+                out.gpu_percent = busy.map(|v| (v as f64).clamp(0., 100.));
                 out.vram_total = vram;
                 out.vram_used = read_u64(device.join("mem_info_vram_used"));
                 if let Ok(hwmons) = fs::read_dir(device.join("hwmon")) {
@@ -310,6 +354,28 @@ impl Sampler {
 }
 fn read_u64(path: impl AsRef<std::path::Path>) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+fn add_engine_load(
+    totals: &mut HashMap<String, f64>,
+    client: &str,
+    current: &DrmClient,
+    old: &DrmClient,
+    dt: f64,
+) {
+    let device = client
+        .rsplit_once(':')
+        .map(|(device, _)| device)
+        .unwrap_or(client);
+    for (engine, (ticks, capacity)) in &current.engines {
+        if let Some(delta) = old
+            .engines
+            .get(engine)
+            .and_then(|(previous, _)| ticks.checked_sub(*previous))
+        {
+            *totals.entry(format!("{device}/{engine}")).or_default() +=
+                delta as f64 / (dt * 1e9 * (*capacity).max(1) as f64) * 100.;
+        }
+    }
 }
 fn sum_option<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
     match (a, b) {

@@ -70,6 +70,25 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        "metrics-status" => {
+            let pid = args.get(2).map(|p| p.parse::<u32>()).transpose()?;
+            let mut sampler = metrics::Sampler::new();
+            let _ = sampler.sample();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let (mut applications, system) = sampler.sample();
+            if let Some(pid) = pid {
+                applications.retain(|a| a.processes.iter().any(|p| p.id.pid == pid));
+            } else {
+                applications.truncate(8);
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"system":system,"applications":applications})
+                )?
+            );
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             println!(
                 "Linux Game Bar\n\n  gamebar run [--show]   Start background panel (KDE: Win+G)\n  gamebar toggle         Toggle panel (Hyprland/Sway key binding)\n  gamebar show|hide|quit  Control running panel\n  gamebar enable-fps     Authorize FPS hot-attach helper with pkexec\n  gamebar audio-list     Diagnose live per-app PipeWire streams"
