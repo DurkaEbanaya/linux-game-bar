@@ -110,9 +110,13 @@ impl Backend {
                                 Err(error)=>{snapshot.fps=gamebar_core::FpsSnapshot {status:error.to_string(),..Default::default()};}
                             }
                             snapshot.revision+=1;
-                        }else if started.elapsed()>Duration::from_secs(120) || child.try_wait().ok().flatten().is_some() {
-                            snapshot.fps.status="FPS-helper не запущен: авторизация отменена или завершилась ошибкой. Нажмите «Включить FPS» повторно.".into();
-                            authorization=None;snapshot.revision+=1;
+                        }else {
+                            let status=child.try_wait().ok().flatten();
+                            if started.elapsed()>Duration::from_secs(120) || status.is_some() {
+                                snapshot.fps.status=fps::authorization_error(status);
+                                snapshot.errors.push(snapshot.fps.status.clone());
+                                authorization=None;snapshot.revision+=1;
+                            }
                         }
                     }
                     if let Ok(update) = updates_rx.try_recv() {

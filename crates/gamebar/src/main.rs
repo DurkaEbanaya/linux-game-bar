@@ -16,7 +16,11 @@ fn main() -> anyhow::Result<()> {
         "run" => overlay::run(args.iter().any(|a| a == "--show")),
         "enable-fps" => {
             let status = fps::authorize()?;
-            println!("FPS helper authorization started (PID {})", status.id());
+            println!(
+                "FPS helper authorization started (PID {}); diagnostics: {}",
+                status.id(),
+                fps::authorization_log().display()
+            );
             Ok(())
         }
         "fps-probes" | "trace-fps" => {

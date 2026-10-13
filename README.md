@@ -64,6 +64,17 @@ cargo build --release --workspace
 bash scripts/install.sh
 ```
 
+Для SELinux-систем (включая openSUSE) установите privileged helper в системный каталог:
+
+```sh
+bash scripts/install.sh --system-helper
+```
+
+Этот режим использует sudo только для `/usr/local/libexec/gamebar-fps-helper`,
+назначает root ownership и восстанавливает стандартный SELinux context через
+`restorecon`. Панель предпочитает этот путь. Запуск privileged helper из `~/.local/bin`
+может быть запрещён SELinux (`entrypoint` / `Permission denied`).
+
 Скрипт устанавливает оба бинарника в `~/.local/bin` и desktop entry.
 `~/.local/bin` должен быть в PATH.
 
@@ -108,7 +119,9 @@ bindsym Mod4+g exec gamebar toggle
 gamebar enable-fps
 ```
 
-Команда запускает соседний `gamebar-fps-helper` через `pkexec`. После авторизации
+Команда запускает системный `gamebar-fps-helper` (или соседний, если системный не установлен)
+через `pkexec`. Ошибки авторизации/запуска выводятся в панели и записываются в
+`$XDG_RUNTIME_DIR/linux-game-bar/fps-helper.log`. После авторизации
 выбрать **точный игровой процесс** → «Подключить FPS». Helper автоматически
 отключается после 10 минут без команд панели. «Отключить» снимает probes.
 Альтернативный запуск администратором: `sudo /absolute/path/gamebar-fps-helper --uid "$(id -u)"`.
@@ -131,9 +144,10 @@ export, который приложение может вообще не выз�
 Steam runtime, контейнерные namespaces и Wine могут не совпасть: отображается ошибка.
 В игру ничего не инжектируется и её render commands не модифицируются.
 
-**Overwatch/Vulkan и OpenGL ещё не проверены.** Наличие кода helper не означает,
-что обязательный точный FPS во всех играх уже достигнут. Instrumentation overhead
-и совместимость с anti-cheat тоже пока не измерены.
+**Overwatch/Vulkan:** hot-attach к запущенной игре с custom Mesa успешно получил
+present FPS и frame intervals без потерь событий. Это пока одна живая диагностическая
+проверка; точность относительно эталонного счётчика и overhead не измерены.
+OpenGL и широкая совместимость с играми/anti-cheat пока не проверены.
 
 ## Известные границы
 

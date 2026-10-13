@@ -28,16 +28,64 @@ pub fn request(request: &FpsRequest) -> anyhow::Result<FpsSnapshot> {
 }
 
 pub fn authorize() -> anyhow::Result<std::process::Child> {
-    let helper = std::env::current_exe()?.with_file_name("gamebar-fps-helper");
+    let system = PathBuf::from("/usr/local/libexec/gamebar-fps-helper");
+    let helper = if system.is_file() {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(&system)?;
+        anyhow::ensure!(
+            metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
+            "System FPS helper must be root-owned and not writable by group/others"
+        );
+        system
+    } else {
+        std::env::current_exe()?.with_file_name("gamebar-fps-helper")
+    };
     anyhow::ensure!(
         helper.is_file(),
         "Build/install gamebar-fps-helper beside gamebar first"
     );
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = crate::ipc::runtime_dir();
+    fs::create_dir_all(&dir)?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    let log = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(authorization_log())?;
     Ok(std::process::Command::new("pkexec")
         .arg(helper)
         .arg("--uid")
         .arg(unsafe { libc::getuid() }.to_string())
+        .stderr(std::process::Stdio::from(log))
         .spawn()?)
+}
+pub fn authorization_log() -> PathBuf {
+    crate::ipc::runtime_dir().join("fps-helper.log")
+}
+pub fn authorization_error(status: Option<std::process::ExitStatus>) -> String {
+    let details = fs::File::open(authorization_log())
+        .ok()
+        .and_then(|file| {
+            let mut text = String::new();
+            file.take(16384).read_to_string(&mut text).ok()?;
+            Some(text)
+        })
+        .unwrap_or_default();
+    format!(
+        "FPS-helper не запущен ({}). {}{}",
+        status
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "таймаут авторизации".into()),
+        details.trim(),
+        if details.contains("Permission denied") {
+            " Установите системный helper: bash scripts/install.sh --system-helper (SELinux запрещает privileged entrypoint в домашнем каталоге)."
+        } else {
+            ""
+        }
+    )
 }
 
 pub fn discover(process: ProcessId) -> anyhow::Result<Vec<Probe>> {

@@ -56,3 +56,29 @@ Updated binaries installed and the old panel shut down through control IPC.
 New panel started as transient user `linux-game-bar.service`; systemd reports
 active/running, with no startup errors in its journal. The game was left running.
 This confirms daemon startup only, not graphical interactions or FPS accuracy.
+
+## Live FPS diagnosis after authorization
+
+The user reported FPS still absent after authorization. Direct `pkexec` execution
+failed with `Permission denied`. SELinux audit (`ausearch -m AVC -ts recent -i`)
+confirmed denied `{ entrypoint }` on `~/.local/bin/gamebar-fps-helper`, type `home_bin_t`.
+SELinux remained enforcing. Installed root-owned helper to `/usr/local/libexec`,
+restored default `bin_t` label, then started it through authorized systemd-run.
+
+Real hot-attach to running Overwatch PID 88141 succeeded with target custom Mesa WSI.
+One actual helper snapshot after accumulation:
+
+- present FPS: `162.58951225715137`
+- mean frame interval: `6.150458206790123 ms`
+- p95 interval: `6.555699 ms`
+- events in window: `325`, lost: `0`
+- swapchain: `0x7f70b010dda0`
+
+This demonstrates actual event delivery and computation in Overwatch, not calibrated
+accuracy or overhead. No automated tests were run. Earlier “privileged attach not
+performed” statements describe the initial build; this diagnosis supersedes them
+for this Overwatch session only. OpenGL remains unverified.
+
+Panel now prefers the root-owned system helper, captures stderr and exit status,
+and displays actionable SELinux installation diagnostics. Install script supports
+`--system-helper` with restorecon.

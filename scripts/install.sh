@@ -16,3 +16,11 @@ if [[ "$prefix" == *$'\n'* || "$prefix" == *'"'* || "$prefix" == *'%'* || "$pref
 fi
 printf '[Desktop Entry]\nType=Application\nName=Linux Game Bar\nComment=Wayland gaming overlay, audio mixer and resources\nExec="%s/bin/gamebar" run\nIcon=applications-games\nTerminal=false\nCategories=Utility;System;\nStartupNotify=false\n' "$prefix" > "$prefix/share/applications/linux-game-bar.desktop"
 printf 'Installed to %s. Start: "%s/bin/gamebar" run\n' "$prefix" "$prefix"
+if [[ "${1:-}" == "--system-helper" ]]; then
+  sudo install -d -m 0755 /usr/local/libexec
+  sudo install -o root -g root -m 0755 "$root/target/release/gamebar-fps-helper" /usr/local/libexec/gamebar-fps-helper
+  if command -v restorecon >/dev/null 2>&1; then
+    sudo restorecon /usr/local/libexec/gamebar-fps-helper
+  fi
+  printf 'System FPS helper installed: /usr/local/libexec/gamebar-fps-helper\n'
+fi
