@@ -5,6 +5,7 @@ mod backend;
 mod desktop;
 mod fps;
 mod ipc;
+mod layout;
 mod metrics;
 mod overlay;
 mod render;

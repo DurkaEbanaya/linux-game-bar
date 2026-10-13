@@ -221,3 +221,20 @@ No automated tests or visual/gameplay acceptance run; compilation does not verif
 mouse interaction. The new pre-paint drag path replaces the flawed prior implementation.
 Final format/check/clippy/release build passed; updated panel installed and transient
 user service restarted active/running. FPS-helper protocol unchanged.
+
+## v0.1.5 animated grid motion and neighbour displacement
+
+Separated persistent grid target positions from transient displayed positions.
+Displayed windows interpolate exponentially at 22/s (dt capped50ms, epsilon0.15
+logical points), repaint every16ms until settled, both edit windows and HUD. Native
+Window current_pos always uses displayed position; paint positions never overwrite
+saved targets. Pointer offset captures the displayed origin for dragging.
+
+New layout.rs performs transactional neighbour displacement: active metric fixed,
+four escape sides ordered by distance/drag direction, grid-aligned placements,
+screen/dashboard constraints, recursive chains with ancestor locking, budget512
+candidate attempts. Failed branches roll back; only impossible placements keep last
+feasible dragged position. Resize also attempts displacement before old settling fallback.
+No automated tests or visual/gameplay acceptance performed.
+Final v0.1.5 fmt/check/clippy/release build passed. Updated user binaries installed;
+panel restarted as transient user service, active/running without startup errors.

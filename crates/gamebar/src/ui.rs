@@ -179,6 +179,8 @@ pub struct Dashboard {
     layout_settled: bool,
     pub hud_suppressed: bool,
     zoom_updated: Instant,
+    displayed_positions: Vec<Option<egui::Pos2>>,
+    movement_updated: Instant,
 }
 impl Dashboard {
     pub fn new(commands: Sender<Command>) -> Self {
@@ -239,6 +241,8 @@ impl Dashboard {
             layout_settled: false,
             hud_suppressed: false,
             zoom_updated: Instant::now(),
+            displayed_positions: Vec::new(),
+            movement_updated: Instant::now(),
         }
     }
     fn send(&self, command: Command) {
@@ -480,6 +484,14 @@ impl Dashboard {
         }
     }
     fn widgets(&mut self, ctx: &egui::Context, screen: egui::Rect, t: &Tokens, hud: bool) {
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.movement_updated)
+            .as_secs_f32()
+            .min(0.05);
+        self.movement_updated = now;
+        self.displayed_positions
+            .resize(self.settings.widgets.len(), None);
         if hud {
             self.metric_drag = None;
             self.window_drag = None;
@@ -488,6 +500,7 @@ impl Dashboard {
             let index = drag.index;
             if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
                 let layout = &mut self.settings.widgets[index];
+                let previous = egui::pos2(layout.position[0], layout.position[1]);
                 let mut position = pointer - drag.offset;
                 let size = egui::vec2(layout.size[0], layout.size[1]);
                 let maximum = screen.max - size;
@@ -513,12 +526,16 @@ impl Dashboard {
                     position.y = position.y.clamp(screen.top(), maximum.y.max(screen.top()));
                 }
                 layout.position = [position.x, position.y];
-                self.positions_pending.insert(index);
-                self.settings_dirty = Some(Instant::now());
+                if (position - previous).length_sq() > 0.01 {
+                    if !self.push_windows(index, screen, ctx, position - previous) {
+                        self.settings.widgets[index].position = [previous.x, previous.y];
+                    }
+                    self.settings_dirty = Some(Instant::now());
+                }
             }
             if !ctx.input(|i| i.pointer.primary_down()) {
                 self.metric_drag = None;
-                self.arrange_window(index, screen, true, ctx);
+                // Already settled transactionally while dragging; do not send the dragged window back.
             }
         }
         self.readings
@@ -529,7 +546,16 @@ impl Dashboard {
                 continue;
             }
             let id = egui::Id::new(("metric-widget", index));
-            let pos = egui::pos2(layout.position[0], layout.position[1]);
+            let target = egui::pos2(layout.position[0], layout.position[1]);
+            let displayed = self.displayed_positions[index].get_or_insert(target);
+            let difference = target - *displayed;
+            if difference.length() > 0.15 {
+                *displayed += difference * (1. - (-dt * 22.).exp());
+                ctx.request_repaint_after(Duration::from_millis(16));
+            } else {
+                *displayed = target;
+            }
+            let pos = *displayed;
             let now = Instant::now();
             let interval = Duration::from_millis(layout.update_ms);
             if self.readings[index]
@@ -580,9 +606,8 @@ impl Dashboard {
                     .default_size(egui::vec2(layout.size[0], layout.size[1]))
                     .min_size(egui::vec2(140., 55.))
                     .constrain_to(screen);
-                if self.positions_pending.remove(&index) {
-                    window = window.current_pos(pos);
-                }
+                self.positions_pending.remove(&index);
+                window = window.current_pos(pos);
                 let response = window.show(ctx, |ui| {
                     // Own the drag instead of correcting egui's free-moving title bar after paint.
                     ui.horizontal(|ui| {
@@ -633,11 +658,10 @@ impl Dashboard {
                 let saved = &mut self.settings.widgets[index];
                 saved.visible = open;
                 if let Some(response) = response {
-                    let moved = (response.response.rect.min - pos).length() > 0.5
-                        || (response.response.rect.size()
-                            - egui::vec2(layout.size[0], layout.size[1]))
-                        .length()
-                            > 0.5;
+                    let moved = (response.response.rect.size()
+                        - egui::vec2(layout.size[0], layout.size[1]))
+                    .length()
+                        > 0.5;
                     if moved
                         && self.metric_drag.is_none()
                         && (self.settings.zoom - self.zoom).abs() < 0.0002
@@ -645,7 +669,7 @@ impl Dashboard {
                     {
                         self.window_drag = Some(index);
                     }
-                    saved.position = [response.response.rect.min.x, response.response.rect.min.y];
+                    // Persist grid targets, never feed interpolated paint positions back into layout.
                     saved.size = [
                         response.response.rect.width(),
                         response.response.rect.height().max(55.),
@@ -664,12 +688,51 @@ impl Dashboard {
             }
             if let Some(index) = self.window_drag {
                 let released = !ctx.input(|i| i.pointer.primary_down());
-                self.arrange_window(index, screen, released, ctx);
+                if !self.push_windows(index, screen, ctx, egui::Vec2::ZERO) {
+                    self.arrange_window(index, screen, released, ctx);
+                }
                 if released {
                     self.window_drag = None;
                 }
             }
         }
+    }
+    fn push_windows(
+        &mut self,
+        index: usize,
+        screen: egui::Rect,
+        ctx: &egui::Context,
+        motion: egui::Vec2,
+    ) -> bool {
+        let rects: Vec<_> = self
+            .settings
+            .widgets
+            .iter()
+            .map(|w| {
+                w.visible.then(|| {
+                    egui::Rect::from_min_size(
+                        egui::pos2(w.position[0], w.position[1]),
+                        egui::vec2(w.size[0], w.size[1]),
+                    )
+                })
+            })
+            .collect();
+        let obstacle = ctx.memory(|m| m.area_rect(egui::Id::new("dashboard")));
+        if obstacle.is_some_and(|o| rects[index].is_some_and(|r| o.expand(3.).intersects(r))) {
+            return false;
+        }
+        let grid = self.settings.grid_snap.then_some(self.settings.grid_size);
+        let Some(placed) =
+            crate::layout::push_neighbours(&rects, index, screen, obstacle, grid, motion)
+        else {
+            return false;
+        };
+        for (layout, rect) in self.settings.widgets.iter_mut().zip(placed) {
+            if let Some(rect) = rect {
+                layout.position = [rect.left(), rect.top()];
+            }
+        }
+        true
     }
     fn arrange_window(
         &mut self,
