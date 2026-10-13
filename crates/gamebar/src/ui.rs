@@ -77,6 +77,11 @@ struct MetricDrag {
     /// Pointer-to-window offset is captured once, so grid rounding never accumulates.
     offset: egui::Vec2,
 }
+struct MetricResize {
+    index: usize,
+    pointer: egui::Pos2,
+    size: egui::Vec2,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
@@ -175,6 +180,7 @@ pub struct Dashboard {
     history_identity: Option<(ProcessId, u64, u64)>,
     window_drag: Option<usize>,
     metric_drag: Option<MetricDrag>,
+    metric_resize: Option<MetricResize>,
     positions_pending: BTreeSet<usize>,
     layout_settled: bool,
     pub hud_suppressed: bool,
@@ -237,6 +243,7 @@ impl Dashboard {
             history_identity: None,
             window_drag: None,
             metric_drag: None,
+            metric_resize: None,
             positions_pending: BTreeSet::new(),
             layout_settled: false,
             hud_suppressed: false,
@@ -492,9 +499,53 @@ impl Dashboard {
         self.movement_updated = now;
         self.displayed_positions
             .resize(self.settings.widgets.len(), None);
+        // Outer geometry, including the header and borders, always spans whole cells.
+        if self.settings.grid_snap {
+            for layout in &mut self.settings.widgets {
+                let size = snap_metric_size(
+                    egui::vec2(layout.size[0], layout.size[1]),
+                    layout.widget,
+                    self.settings.grid_size,
+                    true,
+                );
+                if layout.size != [size.x, size.y] {
+                    layout.size = [size.x, size.y];
+                    self.layout_settled = false;
+                    self.settings_dirty = Some(now);
+                }
+            }
+        }
         if hud {
             self.metric_drag = None;
+            self.metric_resize = None;
             self.window_drag = None;
+        }
+        if !hud && let Some(resize) = &self.metric_resize {
+            let index = resize.index;
+            if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
+                let layout = &mut self.settings.widgets[index];
+                let old = layout.size;
+                let size = snap_metric_size(
+                    resize.size + (pointer - resize.pointer),
+                    layout.widget,
+                    if self.settings.grid_snap {
+                        self.settings.grid_size
+                    } else {
+                        1.
+                    },
+                    false,
+                );
+                layout.size = [size.x, size.y];
+                if old != layout.size {
+                    if !self.push_windows(index, screen, ctx, pointer - resize.pointer) {
+                        self.settings.widgets[index].size = old;
+                    }
+                    self.settings_dirty = Some(now);
+                }
+            }
+            if !ctx.input(|i| i.pointer.primary_down()) {
+                self.metric_resize = None;
+            }
         }
         if !hud && let Some(drag) = &self.metric_drag {
             let index = drag.index;
@@ -583,8 +634,15 @@ impl Dashboard {
                             .corner_radius(0)
                             .inner_margin(8.)
                             .show(ui, |ui| {
-                                ui.set_min_width(layout.size[0].max(140.) - 16.);
-                                ui.set_max_width(layout.size[0].max(140.) - 16.);
+                                ui.set_min_size(egui::vec2(
+                                    layout.size[0] - 16.,
+                                    layout.size[1] - 16.,
+                                ));
+                                ui.set_max_size(egui::vec2(
+                                    layout.size[0] - 16.,
+                                    layout.size[1] - 16.,
+                                ));
+                                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
                                 ui.label(
                                     RichText::new(layout.widget.title())
                                         .small()
@@ -603,8 +661,8 @@ impl Dashboard {
                     .movable(false)
                     .collapsible(false)
                     .default_pos(pos)
-                    .default_size(egui::vec2(layout.size[0], layout.size[1]))
-                    .min_size(egui::vec2(140., 55.))
+                    .fixed_size(egui::vec2(layout.size[0], layout.size[1]))
+                    .scroll([false, true])
                     .constrain_to(screen);
                 self.positions_pending.remove(&index);
                 window = window.current_pos(pos);
@@ -621,6 +679,7 @@ impl Dashboard {
                                     t.compact_height,
                                 ),
                                 egui::Label::new(RichText::new(layout.widget.title()).strong())
+                                    .truncate()
                                     .sense(egui::Sense::drag()),
                             )
                             .on_hover_cursor(egui::CursorIcon::Grab);
@@ -632,6 +691,7 @@ impl Dashboard {
                                 offset: start - pos,
                             });
                             self.window_drag = None;
+                            self.metric_resize = None;
                         }
                         if title.dragged() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -654,30 +714,37 @@ impl Dashboard {
                     });
                     ui.separator();
                     widget_content(ui, layout.widget, reading, t, false, layout.size[1]);
+                    let corner = pos + egui::vec2(layout.size[0] - 12., layout.size[1] - 12.);
+                    let grip_rect = egui::Rect::from_min_size(
+                        corner - egui::vec2(12., 12.),
+                        egui::vec2(18., 18.),
+                    );
+                    // The resize handle belongs to the outer window, not its scrolled content.
+                    ui.set_clip_rect(ui.clip_rect().union(grip_rect));
+                    let grip = ui
+                        .interact(grip_rect, id.with("size-grip"), egui::Sense::drag())
+                        .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+                    ui.painter().line_segment(
+                        [grip_rect.left_bottom(), grip_rect.right_top()],
+                        egui::Stroke::new(2., t.muted),
+                    );
+                    if grip.drag_started_by(egui::PointerButton::Primary)
+                        && let Some(pointer) = ui.input(|i| i.pointer.press_origin())
+                    {
+                        self.metric_resize = Some(MetricResize {
+                            index,
+                            pointer,
+                            size: egui::vec2(layout.size[0], layout.size[1]),
+                        });
+                        self.metric_drag = None;
+                    }
                 });
                 let saved = &mut self.settings.widgets[index];
                 saved.visible = open;
-                if let Some(response) = response {
-                    let moved = (response.response.rect.size()
-                        - egui::vec2(layout.size[0], layout.size[1]))
-                    .length()
-                        > 0.5;
-                    if moved
-                        && self.metric_drag.is_none()
-                        && (self.settings.zoom - self.zoom).abs() < 0.0002
-                        && ctx.input(|i| i.pointer.primary_down())
-                    {
-                        self.window_drag = Some(index);
-                    }
-                    // Persist grid targets, never feed interpolated paint positions back into layout.
-                    saved.size = [
-                        response.response.rect.width(),
-                        response.response.rect.height().max(55.),
-                    ];
-                }
+                let _ = response;
             }
         }
-        if !hud && self.metric_drag.is_none() {
+        if !hud && self.metric_drag.is_none() && self.metric_resize.is_none() {
             if !self.layout_settled {
                 for index in 0..self.settings.widgets.len() {
                     if self.settings.widgets[index].visible {
@@ -718,6 +785,9 @@ impl Dashboard {
             })
             .collect();
         let obstacle = ctx.memory(|m| m.area_rect(egui::Id::new("dashboard")));
+        if rects[index].is_some_and(|r| !screen.contains_rect(r)) {
+            return false;
+        }
         if obstacle.is_some_and(|o| rects[index].is_some_and(|r| o.expand(3.).intersects(r))) {
             return false;
         }
@@ -1257,6 +1327,18 @@ fn settings_path() -> PathBuf {
             PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
         })
         .join("linux-game-bar/layout.json")
+}
+fn snap_metric_size(size: egui::Vec2, widget: Widget, step: f32, grow: bool) -> egui::Vec2 {
+    let minimum = match widget {
+        Widget::FrameTime => egui::vec2(320., 192.),
+        Widget::AppDisk | Widget::SystemDisk => egui::vec2(320., 144.),
+        _ => egui::vec2(192., 112.),
+    };
+    let quantize = |value: f32, min: f32| {
+        let units = value / step;
+        (if grow { units.ceil() } else { units.round() }).max((min / step).ceil()) * step
+    };
+    egui::vec2(quantize(size.x, minimum.x), quantize(size.y, minimum.y))
 }
 pub fn saved_hud_shortcut() -> String {
     std::fs::read(settings_path())

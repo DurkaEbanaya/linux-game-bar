@@ -238,3 +238,16 @@ feasible dragged position. Resize also attempts displacement before old settling
 No automated tests or visual/gameplay acceptance performed.
 Final v0.1.5 fmt/check/clippy/release build passed. Updated user binaries installed;
 panel restarted as transient user service, active/running without startup errors.
+
+## v0.1.6 metric size grid
+
+Outer width/height quantized to grid: saved dimensions round upward; resize uses
+nearest step with per-widget minimum dimensions. Explicit bottom-right drag handle
+captures press position and original size, applies snapped geometry before paint,
+pushes neighbours transactionally and rejects out-of-screen/impossible growth.
+Window fixed_size prevents native egui/content from overwriting quantized dimensions;
+scrolling accommodates long content. HUD minimum/maximum content area uses matching
+outer size minus frame margins. Grid disabled: one logical pixel resize increments.
+No automated tests or visual/gameplay acceptance run.
+Final v0.1.6 format/check/clippy/release build passed. Updated user binaries installed;
+panel restarted active/running with no startup errors. FPS protocol unchanged.
