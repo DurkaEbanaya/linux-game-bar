@@ -2,7 +2,7 @@ use crate::{backend::Backend, ipc::Control, render::Gpu, ui::Dashboard};
 use crossbeam_channel::{Receiver, bounded};
 use gamebar_core::ActiveWindow;
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, Region},
     delegate_registry,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
@@ -49,6 +49,7 @@ struct Overlay {
     size: [u32; 2],
     scale: i32,
     configured: bool,
+    menu: bool,
     dirty: bool,
     quit: bool,
     start: Instant,
@@ -80,6 +81,7 @@ pub fn run(show: bool) -> anyhow::Result<()> {
         size: [1280, 720],
         scale: 1,
         configured: false,
+        menu: false,
         dirty: false,
         quit: false,
         start: Instant::now(),
@@ -93,7 +95,7 @@ pub fn run(show: bool) -> anyhow::Result<()> {
     while !app.quit {
         queue.dispatch_pending(&mut app)?;
         // Active-window publication precedes the KWin toggle message on the same D-Bus bridge.
-        if app.layer.is_none() {
+        if !app.menu {
             while let Ok(active) = active_rx.try_recv() {
                 app.dashboard.active = active;
             }
@@ -101,11 +103,11 @@ pub fn run(show: bool) -> anyhow::Result<()> {
         while let Ok(control) = control_rx.try_recv() {
             match control {
                 Control::Quit => app.quit = true,
-                Control::Hide => app.hide(),
-                Control::Show if app.layer.is_none() => app.show(&conn, &qh, &active_rx)?,
+                Control::Hide => app.return_to_game()?,
+                Control::Show if !app.menu => app.show(&conn, &qh, &active_rx)?,
                 Control::Toggle => {
-                    if app.layer.is_some() {
-                        app.hide()
+                    if app.menu {
+                        app.return_to_game()?
                     } else {
                         app.show(&conn, &qh, &active_rx)?
                     }
@@ -120,9 +122,15 @@ pub fn run(show: bool) -> anyhow::Result<()> {
             }
         }
         if app.dashboard.hide {
-            app.hide();
+            if app.dashboard.suspend_hud {
+                app.destroy();
+                app.dashboard.suspend_hud = false;
+            } else {
+                app.return_to_game()?;
+            }
             app.dashboard.hide = false;
         }
+        app.dashboard.save(false);
         if app.layer.is_some() && app.configured && (app.dirty || Instant::now() >= repaint_at) {
             app.ctx.set_zoom_factor(app.dashboard.zoom);
             app.input.screen_rect = Some(egui::Rect::from_min_size(
@@ -140,9 +148,9 @@ pub fn run(show: bool) -> anyhow::Result<()> {
                 .native_pixels_per_point = Some(app.scale as f32);
             let output = app
                 .ctx
-                .run_ui(app.input.take(), |root| app.dashboard.show(root));
+                .run_ui(app.input.take(), |root| app.dashboard.show(root, !app.menu));
             let cursor = cursor_shape(output.platform_output.cursor_icon);
-            if cursor != app.cursor {
+            if app.menu && cursor != app.cursor {
                 app.cursor = cursor;
                 if let Some(pointer) = &app.pointer {
                     let _ = pointer.set_cursor(&conn, cursor);
@@ -164,7 +172,7 @@ pub fn run(show: bool) -> anyhow::Result<()> {
                     ],
                 ) {
                     eprintln!("Render: {e}");
-                    app.hide();
+                    app.destroy();
                 }
             }
             app.dirty = false;
@@ -192,7 +200,8 @@ pub fn run(show: bool) -> anyhow::Result<()> {
             }
         }
     }
-    app.hide();
+    app.dashboard.save(true);
+    app.destroy();
     backend.shutdown();
     let _ = std::fs::remove_file(crate::ipc::runtime_dir().join("control.sock"));
     Ok(())
@@ -209,6 +218,7 @@ impl Overlay {
         }
         self.dashboard
             .select_active(crate::desktop::query_active(&self.dashboard.active));
+        self.destroy();
         let output = self.outputs.outputs().find(|output| {
             self.outputs
                 .info(output)
@@ -237,16 +247,38 @@ impl Overlay {
         self.input = egui::RawInput::default();
         layer.commit();
         self.layer = Some(layer);
+        self.menu = true;
         Ok(())
     }
-    fn hide(&mut self) {
+    fn return_to_game(&mut self) -> anyhow::Result<()> {
+        self.dashboard.save(true);
+        if self.dashboard.hud_enabled() {
+            if let Some(layer) = &self.layer {
+                // An empty region, NOT None (None means the whole surface), passes all pointer input through.
+                let region = Region::new(&self.compositor)?;
+                layer.set_input_region(Some(region.wl_region()));
+                layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+                layer.commit();
+                self.menu = false;
+                self.input = egui::RawInput::default();
+                self.input.focused = false;
+                self.modifiers = egui::Modifiers::default();
+                self.dirty = true;
+            }
+        } else {
+            self.destroy();
+        }
+        Ok(())
+    }
+    fn destroy(&mut self) {
         self.gpu.take();
         self.layer.take();
         self.configured = false;
+        self.menu = false;
         self.input = egui::RawInput::default();
     }
     fn key(&mut self, event: KeyEvent, pressed: bool, repeat: bool) {
-        if self.layer.is_none() {
+        if !self.menu {
             return;
         }
         if pressed
@@ -345,7 +377,7 @@ impl OutputHandler for Overlay {
 }
 impl LayerShellHandler for Overlay {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
-        self.dashboard.hide = true;
+        self.destroy();
     }
     fn configure(
         &mut self,
@@ -493,6 +525,9 @@ impl PointerHandler for Overlay {
         events: &[PointerEvent],
     ) {
         for event in events {
+            if !self.menu {
+                continue;
+            }
             if !self
                 .layer
                 .as_ref()

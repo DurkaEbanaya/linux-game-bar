@@ -76,11 +76,21 @@ pub struct ActiveWindow {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FpsSnapshot {
     pub process: Option<ProcessId>,
     pub fps: Option<f64>,
     pub frame_ms: Option<f64>,
     pub p95_ms: Option<f64>,
+    /// Rolling average cadence over up to 30 seconds, reset on attach/loss/swapchain change.
+    pub avg_fps: Option<f64>,
+    /// 1000 / mean of the slowest ceil(N * fraction) present intervals.
+    pub low_1_fps: Option<f64>,
+    pub low_01_fps: Option<f64>,
+    pub statistics_seconds: f64,
+    pub statistics_frames: u64,
+    /// Individual present intervals in chronological order (up to 4096, last 2 seconds).
+    pub frame_times_ms: Vec<f64>,
     pub source: String,
     pub status: String,
     pub frames: u64,

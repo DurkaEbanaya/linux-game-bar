@@ -1,36 +1,158 @@
 use crossbeam_channel::Sender;
 use egui::{Color32, RichText, Ui};
-use gamebar_core::{ActiveWindow, Command, Direction, ProcessId, Snapshot, Sort, Theme};
+use gamebar_core::{
+    ActiveWindow, Application, Command, Direction, ProcessId, Snapshot, Sort, Theme,
+};
+use serde::{Deserialize, Serialize};
 use silver_ui_kit::{buttons::icon_button, icons::Glyph, theme::Tokens};
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum Widget {
+    Fps,
+    Average,
+    Low1,
+    Low01,
+    FrameTime,
+    AppCpu,
+    AppGpu,
+    AppRam,
+    SystemCpu,
+    SystemGpu,
+    SystemRam,
+    Temperature,
+    Vram,
+}
+impl Widget {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Fps => "PRESENT FPS",
+            Self::Average => "AVG FPS · 30 s",
+            Self::Low1 => "1% LOW",
+            Self::Low01 => "0,1% LOW",
+            Self::FrameTime => "FRAMETIME · present",
+            Self::AppCpu => "CPU приложения",
+            Self::AppGpu => "GPU приложения",
+            Self::AppRam => "RAM приложения",
+            Self::SystemCpu => "CPU системы",
+            Self::SystemGpu => "GPU системы",
+            Self::SystemRam => "RAM системы",
+            Self::Temperature => "Температуры системы",
+            Self::Vram => "VRAM системы",
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct WidgetLayout {
+    widget: Widget,
+    visible: bool,
+    position: [f32; 2],
+    size: [f32; 2],
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct Settings {
+    theme: Theme,
+    zoom: f32,
+    hud: bool,
+    opacity: f32,
+    widgets: Vec<WidgetLayout>,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        let widgets = [
+            Widget::Fps,
+            Widget::Average,
+            Widget::Low1,
+            Widget::Low01,
+            Widget::AppCpu,
+            Widget::AppGpu,
+            Widget::AppRam,
+            Widget::SystemCpu,
+            Widget::SystemGpu,
+            Widget::SystemRam,
+            Widget::Temperature,
+            Widget::Vram,
+        ];
+        let mut layouts: Vec<_> = widgets
+            .iter()
+            .enumerate()
+            .map(|(i, widget)| WidgetLayout {
+                widget: *widget,
+                visible: i < 7,
+                position: [24. + (i % 4) as f32 * 195., 24. + (i / 4) as f32 * 100.],
+                size: [175., 65.],
+            })
+            .collect();
+        layouts.push(WidgetLayout {
+            widget: Widget::FrameTime,
+            visible: true,
+            position: [24., 235.],
+            size: [740., 190.],
+        });
+        Self {
+            theme: Theme::default(),
+            zoom: 1.,
+            hud: true,
+            opacity: 0.45,
+            widgets: layouts,
+        }
+    }
+}
 
 pub struct Dashboard {
     pub snapshot: Snapshot,
     pub selected: Option<ProcessId>,
     pub active: ActiveWindow,
-    theme: Theme,
     pub zoom: f32,
+    settings: Settings,
     tab: usize,
     sort: Sort,
+    hot_sort: Sort,
     filter: String,
-    history: VecDeque<Option<f64>>,
     pub hide: bool,
+    pub suspend_hud: bool,
     commands: Sender<Command>,
+    settings_dirty: Option<Instant>,
 }
 impl Dashboard {
     pub fn new(commands: Sender<Command>) -> Self {
+        let settings = std::fs::read(settings_path())
+            .ok()
+            .filter(|b| b.len() <= 65536)
+            .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
+            .filter(|s| {
+                s.widgets.len() <= 32
+                    && s.zoom.is_finite()
+                    && (0.75..=1.5).contains(&s.zoom)
+                    && s.opacity.is_finite()
+                    && (0.1..=0.9).contains(&s.opacity)
+                    && s.widgets.iter().all(|w| {
+                        w.position
+                            .iter()
+                            .chain(w.size.iter())
+                            .all(|v| v.is_finite() && v.abs() < 20000.)
+                    })
+            })
+            .unwrap_or_default();
         Self {
             snapshot: Snapshot::default(),
             selected: None,
             active: ActiveWindow::default(),
-            theme: Theme::default(),
-            zoom: 1.,
+            zoom: settings.zoom,
+            settings,
             tab: 0,
             sort: Sort::Cpu,
+            hot_sort: Sort::Cpu,
             filter: String::new(),
-            history: VecDeque::new(),
             hide: false,
+            suspend_hud: false,
             commands,
+            settings_dirty: None,
         }
     }
     fn send(&self, command: Command) {
@@ -41,150 +163,234 @@ impl Dashboard {
     pub fn select_active(&mut self, active: ActiveWindow) {
         if let Some(id) = active.pid.and_then(crate::metrics::process_id) {
             if self.selected != Some(id) {
-                self.history.clear();
+                self.selected = Some(id);
+                self.send(Command::SelectProcess(Some(id)));
             }
-            self.selected = Some(id);
-            self.send(Command::SelectProcess(Some(id)));
         }
         self.active = active;
     }
     pub fn update(&mut self, snapshot: Snapshot) {
-        if snapshot.revision != self.snapshot.revision {
-            self.history
-                .push_back(if snapshot.fps.process == self.selected {
-                    snapshot.fps.fps
-                } else {
-                    None
-                });
-            if self.history.len() > 90 {
-                self.history.pop_front();
-            }
-            self.snapshot = snapshot;
-        }
+        self.snapshot = snapshot;
     }
-    pub fn show(&mut self, root: &mut Ui) {
-        let ctx = root.ctx().clone();
-        let tokens = match self.theme {
+    pub fn hud_enabled(&self) -> bool {
+        self.settings.hud && self.settings.widgets.iter().any(|w| w.visible)
+    }
+    pub fn save(&mut self, force: bool) {
+        if self.settings_dirty.is_none()
+            || (!force
+                && self
+                    .settings_dirty
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(1)))
+        {
+            return;
+        }
+        self.settings.zoom = self.zoom;
+        let path = settings_path();
+        let result = (|| -> anyhow::Result<()> {
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            let temporary = path.with_extension("json.tmp");
+            std::fs::write(&temporary, serde_json::to_vec_pretty(&self.settings)?)?;
+            std::fs::rename(temporary, path)?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            eprintln!("Settings: {e}");
+        }
+        self.settings_dirty = None;
+    }
+    fn tokens(&self, hud: bool) -> Tokens {
+        if hud {
+            return Tokens::pro_dark();
+        }
+        match self.settings.theme {
             Theme::ProDark => Tokens::pro_dark(),
             Theme::StudioLight => Tokens::studio_light(),
             Theme::ModernDark => Tokens::modern_dark(),
-        };
-        tokens.apply(&ctx);
+        }
+    }
+    pub fn show(&mut self, root: &mut Ui, hud: bool) {
+        let ctx = root.ctx().clone();
+        let t = self.tokens(hud);
+        t.apply(&ctx);
         let rect = root.max_rect();
+        if hud {
+            self.widgets(&ctx, rect, &t, true);
+            return;
+        }
         root.painter()
-            .rect_filled(rect, 0., Color32::from_black_alpha(115));
-        let width = (rect.width() - 40.).clamp(320., 1140.);
-        let height = (rect.height() - 120.).max(260.);
-        egui::Window::new("Linux Game Bar")
-            .id(egui::Id::new("dashboard"))
-            .title_bar(true)
-            .collapsible(false)
-            .resizable(true)
-            .movable(true)
-            .scroll([false, true])
-            .default_pos(egui::pos2((rect.width() - width) / 2., 50.))
-            .default_size(egui::vec2(width, height.min(800.)))
-            .min_size(egui::vec2(620., 380.))
-            .max_size(egui::vec2(
-                (rect.width() - 20.).max(620.),
-                (rect.height() - 40.).max(380.),
-            ))
-            .show(&ctx, |ui| {
+            .rect_filled(rect, 0., Color32::from_black_alpha(100));
+        let before = serde_json::to_vec(&self.settings).unwrap_or_default();
+        let old_zoom = self.zoom;
+        egui::Window::new("Linux Game Bar").id(egui::Id::new("dashboard"))
+            .collapsible(false).default_pos(egui::pos2((rect.width() - 510.).max(20.), 25.))
+            .default_size(egui::vec2(480., 640.)).min_width(430.)
+            .scroll([false, true]).show(&ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading("GAME BAR");
-                    ui.label(RichText::new("Linux · Wayland").color(tokens.muted));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_button(ui, &tokens, Glyph::Close, false, "Скрыть · Esc").clicked()
-                        {
-                            self.hide = true;
-                        }
-                        egui::ComboBox::from_id_salt("theme")
-                            .selected_text(tokens.theme_name)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.theme, Theme::ProDark, "Pro Dark");
-                                ui.selectable_value(
-                                    &mut self.theme,
-                                    Theme::StudioLight,
-                                    "Studio Light",
-                                );
-                                ui.selectable_value(
-                                    &mut self.theme,
-                                    Theme::ModernDark,
-                                    "Modern Dark",
-                                );
-                            });
-                        ui.add(
-                            egui::Slider::new(&mut self.zoom, 0.75..=1.5)
-                                .step_by(0.05)
-                                .text("Масштаб"),
-                        );
-                    });
+                    for (i, title) in ["Производительность", "Ресурсы"].iter().enumerate() {
+                        ui.selectable_value(&mut self.tab, i, *title);
+                    }
+                    if icon_button(ui, &t, Glyph::Close, false, "Вернуться в игру · Esc").clicked() { self.hide = true; }
                 });
                 ui.separator();
-                ui.horizontal(|ui| {
-                    for (i, label) in ["Производительность", "Аудиомикшер", "Ресурсы"]
-                        .iter()
-                        .enumerate()
-                    {
-                        ui.selectable_value(&mut self.tab, i, *label);
+                ui.menu_button("Виджеты и HUD…", |ui| {
+                    ui.checkbox(&mut self.settings.hud, "Оставлять HUD поверх игры");
+                    ui.add(egui::Slider::new(&mut self.settings.opacity, 0.1..=0.9).text("Фон HUD"));
+                    ui.add(egui::Slider::new(&mut self.zoom, 0.75..=1.5).step_by(0.05).text("Масштаб"));
+                    egui::ComboBox::from_id_salt("theme").selected_text(t.theme_name).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.settings.theme, Theme::ProDark, "Pro Dark");
+                        ui.selectable_value(&mut self.settings.theme, Theme::StudioLight, "Studio Light");
+                        ui.selectable_value(&mut self.settings.theme, Theme::ModernDark, "Modern Dark");
+                    });
+                    ui.separator();
+                    for layout in &mut self.settings.widgets { ui.checkbox(&mut layout.visible, layout.widget.title()); }
+                    if ui.button("Сбросить расположение").clicked() {
+                        self.settings.widgets = Settings::default().widgets;
+                        ctx.memory_mut(|m| *m = egui::Memory::default());
                     }
                 });
-                ui.add_space(8.);
-                match self.tab {
-                    0 => self.performance(ui, &tokens),
-                    1 => self.mixer(ui, &tokens),
-                    _ => self.resources(ui, &tokens),
-                }
-                if let Some(error) = self.snapshot.errors.last() {
-                    ui.separator();
-                    ui.label(RichText::new(error).color(tokens.warning));
-                }
+                ui.label(RichText::new("Перетаскивайте метрики за заголовок; × скрывает виджет. Esc / Win+G оставляет только HUD, без захвата ввода.").small().color(t.muted));
+                ui.separator();
+                if self.tab == 0 { self.performance_controls(ui, &t); } else { self.resources(ui, &t); }
+                if let Some(error) = self.snapshot.errors.last() { ui.separator(); ui.colored_label(t.warning, error); }
             });
+        if self.tab == 0 {
+            self.widgets(&ctx, rect, &t, false);
+        }
+        if old_zoom != self.zoom || before != serde_json::to_vec(&self.settings).unwrap_or_default()
+        {
+            self.settings_dirty = Some(Instant::now());
+        }
     }
-    fn process_picker(&mut self, ui: &mut Ui) {
-        let previous = self.selected;
-        let selected = self.selected.and_then(|id| {
+    fn widgets(&mut self, ctx: &egui::Context, screen: egui::Rect, t: &Tokens, hud: bool) {
+        for index in 0..self.settings.widgets.len() {
+            let layout = self.settings.widgets[index].clone();
+            if !layout.visible {
+                continue;
+            }
+            let id = egui::Id::new(("metric-widget", index));
+            let pos = egui::pos2(layout.position[0], layout.position[1]);
+            if hud {
+                egui::Area::new(id.with("hud"))
+                    .fixed_pos(pos)
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(Color32::from_black_alpha(
+                                (self.settings.opacity * 255.) as u8,
+                            ))
+                            .corner_radius(5)
+                            .inner_margin(8.)
+                            .show(ui, |ui| {
+                                ui.set_min_width(layout.size[0].max(140.) - 16.);
+                                ui.set_max_width(layout.size[0].max(140.) - 16.);
+                                ui.label(
+                                    RichText::new(layout.widget.title())
+                                        .small()
+                                        .color(Color32::from_gray(200)),
+                                );
+                                self.widget_content(ui, layout.widget, t, true, layout.size[1]);
+                            });
+                    });
+            } else {
+                let mut open = true;
+                let response = egui::Window::new(layout.widget.title())
+                    .id(id)
+                    .open(&mut open)
+                    .collapsible(false)
+                    .default_pos(pos)
+                    .default_size(egui::vec2(layout.size[0], layout.size[1]))
+                    .min_size(egui::vec2(140., 55.))
+                    .constrain_to(screen)
+                    .show(ctx, |ui| {
+                        self.widget_content(ui, layout.widget, t, false, layout.size[1])
+                    });
+                let saved = &mut self.settings.widgets[index];
+                saved.visible = open;
+                if let Some(response) = response {
+                    saved.position = [response.response.rect.min.x, response.response.rect.min.y];
+                    saved.size = [
+                        response.response.rect.width(),
+                        response.response.rect.height().max(55.),
+                    ];
+                }
+            }
+        }
+    }
+    fn widget_content(&self, ui: &mut Ui, widget: Widget, t: &Tokens, hud: bool, height: f32) {
+        let fps = (self.snapshot.fps.process == self.selected).then_some(&self.snapshot.fps);
+        let app = self.selected.and_then(|id| {
             self.snapshot
                 .applications
                 .iter()
-                .flat_map(|a| &a.processes)
-                .find(|p| p.id == id)
+                .find(|a| a.processes.iter().any(|p| p.id == id))
         });
-        let text = selected
-            .map(|p| format!("{} · PID {}", p.name, p.id.pid))
-            .unwrap_or_else(|| "Выберите приложение".into());
-        egui::ComboBox::from_id_salt("process")
-            .width(360.)
-            .selected_text(text)
-            .show_ui(ui, |ui| {
-                for app in &self.snapshot.applications {
-                    for p in &app.processes {
-                        if ui
-                            .selectable_value(
-                                &mut self.selected,
-                                Some(p.id),
-                                format!("{} · PID {}", p.name, p.id.pid),
-                            )
-                            .changed()
-                        {
-                            self.send(Command::SelectProcess(self.selected));
-                        }
-                    }
-                }
-            });
-        if previous != self.selected {
-            self.history.clear();
+        let s = &self.snapshot.system;
+        if matches!(widget, Widget::FrameTime) {
+            ui.label(format!(
+                "Среднее {} · p95 {}",
+                number(fps.and_then(|f| f.frame_ms), " ms"),
+                number(fps.and_then(|f| f.p95_ms), " ms")
+            ));
+            let graph_height = if hud {
+                height - 60.
+            } else {
+                ui.available_height()
+            };
+            frame_plot(
+                ui,
+                fps.map(|f| f.frame_times_ms.as_slice()).unwrap_or(&[]),
+                graph_height.clamp(70., 400.),
+                t,
+            );
+            return;
         }
+        let value = match widget {
+            Widget::Fps => number(fps.and_then(|f| f.fps), ""),
+            Widget::Average => number(fps.and_then(|f| f.avg_fps), ""),
+            Widget::Low1 => number(fps.and_then(|f| f.low_1_fps), ""),
+            Widget::Low01 => number(fps.and_then(|f| f.low_01_fps), ""),
+            Widget::AppCpu => number(app.and_then(|a| a.cpu_percent), "%"),
+            Widget::AppGpu => number(app.and_then(|a| a.gpu_percent), "%"),
+            Widget::AppRam => app
+                .map(|a| bytes(a.memory_bytes))
+                .unwrap_or_else(|| "—".into()),
+            Widget::SystemCpu => number(s.cpu_percent, "%"),
+            Widget::SystemGpu => number(s.gpu_percent, "%"),
+            Widget::SystemRam => format!("{} / {}", bytes(s.memory_used), bytes(s.memory_total)),
+            Widget::Temperature => format!(
+                "CPU {} · GPU {}",
+                number(s.cpu_temperature, "°C"),
+                number(s.gpu_temperature, "°C")
+            ),
+            Widget::Vram => format!(
+                "{} / {}",
+                s.vram_used.map(bytes).unwrap_or_else(|| "—".into()),
+                s.vram_total.map(bytes).unwrap_or_else(|| "—".into())
+            ),
+            Widget::FrameTime => unreachable!(),
+        };
+        ui.label(
+            RichText::new(value)
+                .size(if hud { 22. } else { 25. })
+                .strong(),
+        );
     }
-    fn performance(&mut self, ui: &mut Ui, t: &Tokens) {
-        let helper_ready = crate::fps::socket_path().exists();
+    fn performance_controls(&mut self, ui: &mut Ui, t: &Tokens) {
+        ui.label(
+            RichText::new(if self.active.title.is_empty() {
+                "Откройте Win+G из игры"
+            } else {
+                &self.active.title
+            })
+            .strong(),
+        );
+        let helper = crate::fps::socket_path().exists();
         ui.horizontal(|ui| {
-            self.process_picker(ui);
             if ui
                 .add_enabled(
                     self.selected.is_some(),
-                    egui::Button::new(if helper_ready {
-                        "Подключить FPS"
+                    egui::Button::new(if helper {
+                        "Переподключить FPS"
                     } else {
                         "Включить FPS"
                     }),
@@ -192,238 +398,191 @@ impl Dashboard {
                 .clicked()
             {
                 if let Some(id) = self.selected {
-                    self.send(if helper_ready {
+                    self.send(if helper {
                         Command::TraceFps(id)
                     } else {
                         Command::AuthorizeFps(id)
                     });
-                    // Release exclusive layer keyboard focus for the system authorization dialog.
-                    if !helper_ready {
+                    if !helper {
+                        self.suspend_hud = true;
                         self.hide = true;
                     }
                 }
             }
-            if ui.button("Отключить").clicked() {
+            if ui.button("Отключить FPS").clicked() {
                 self.send(Command::StopFps);
             }
         });
-        if !helper_ready {
-            ui.label(RichText::new("FPS требует отдельного helper: «Включить FPS» откроет системную авторизацию и подключится к выбранной игре.").color(t.warning));
-        }
-        let app = self.selected.and_then(|id| {
-            self.snapshot
-                .applications
-                .iter()
-                .find(|a| a.processes.iter().any(|p| p.id == id))
-        });
-        ui.add_space(12.);
-        ui.columns(4, |columns| {
-            metric(
-                &mut columns[0],
-                "PRESENT FPS",
-                number(
-                    if self.snapshot.fps.process == self.selected {
-                        self.snapshot.fps.fps
-                    } else {
-                        None
-                    },
-                    "",
-                ),
-                t,
-            );
-            metric(
-                &mut columns[1],
-                "CPU приложения",
-                number(app.and_then(|a| a.cpu_percent), "%"),
-                t,
-            );
-            metric(
-                &mut columns[2],
-                "RAM приложения",
-                app.map(|a| bytes(a.memory_bytes))
-                    .unwrap_or_else(|| "—".into()),
-                t,
-            );
-            metric(
-                &mut columns[3],
-                "GPU приложения",
-                number(app.and_then(|a| a.gpu_percent), "%"),
-                t,
-            );
-        });
-        ui.add_space(10.);
-        ui.label(format!(
-            "{}  {}  {}",
-            self.snapshot
-                .fps
-                .process
-                .map(|p| format!("Trace PID {} ·", p.pid))
-                .unwrap_or_default(),
-            self.snapshot.fps.source,
-            self.snapshot.fps.status
-        ));
+        ui.label(
+            RichText::new(&self.snapshot.fps.status)
+                .small()
+                .color(t.muted),
+        );
+        ui.label(
+            RichText::new(format!(
+                "Статистика {:.1} s · {} интервалов · lost {}",
+                self.snapshot.fps.statistics_seconds,
+                self.snapshot.fps.statistics_frames,
+                self.snapshot.fps.lost
+            ))
+            .small(),
+        );
+        ui.label(RichText::new("AVG / lows: последние 30 s. 1% и 0,1% low = 1000 / среднее самых медленных интервалов. Нужны ≥100 / ≥1000 кадров. Frametime — расстояние между успешными present, не GPU render time.").small().color(t.muted));
+        ui.separator();
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "Frame interval: {}",
-                number(self.snapshot.fps.frame_ms, " ms")
-            ));
-            ui.label(format!("p95: {}", number(self.snapshot.fps.p95_ms, " ms")));
-            ui.label(format!("Lost: {}", self.snapshot.fps.lost));
+            ui.strong("Интенсивные приложения");
+            ui.selectable_value(&mut self.hot_sort, Sort::Cpu, "CPU");
+            ui.selectable_value(&mut self.hot_sort, Sort::Gpu, "GPU");
         });
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 125.), egui::Sense::hover());
-        ui.painter().rect_filled(rect, t.radius, t.bg);
-        let max = self.history.iter().flatten().copied().fold(60., f64::max);
-        let mut previous = None;
-        for (i, value) in self.history.iter().enumerate() {
-            if let Some(value) = value {
-                let point = egui::pos2(
-                    rect.left() + i as f32 / 89. * rect.width(),
-                    rect.bottom() - (*value / max) as f32 * (rect.height() - 12.) - 6.,
-                );
-                if let Some(prev) = previous {
-                    ui.painter()
-                        .line_segment([prev, point], egui::Stroke::new(2., t.accent));
-                }
-                ui.painter().circle_filled(point, 1.5, t.accent);
-                previous = Some(point);
-            } else {
-                previous = None;
-            }
+        ui.label(
+            RichText::new(&self.snapshot.audio_status)
+                .small()
+                .color(t.muted),
+        );
+        let mut apps = self.snapshot.applications.clone();
+        apps.sort_by(|a, b| sort_value(b, self.hot_sort).total_cmp(&sort_value(a, self.hot_sort)));
+        let hot: BTreeSet<_> = apps.iter().take(8).map(|a| a.key.clone()).collect();
+        apps.retain(|a| {
+            hot.contains(&a.key)
+                || self.snapshot.streams.iter().any(|s| {
+                    s.app_key == a.key
+                        || s.process
+                            .is_some_and(|id| a.processes.iter().any(|p| p.id == id))
+                })
+        });
+        let mut covered = BTreeSet::new();
+        for app in apps.iter().take(24) {
+            ui.push_id(&app.key, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(&app.name);
+                    ui.label(format!(
+                        "CPU {} · GPU {}",
+                        number(app.cpu_percent, "%"),
+                        number(app.gpu_percent, "%")
+                    ));
+                });
+                let keys = self.audio_keys(app);
+                covered.extend(keys.iter().cloned());
+                self.audio_controls(ui, &keys);
+                ui.separator();
+            });
         }
-        ui.add_space(12.);
-        ui.heading("Система");
-        let s = &self.snapshot.system;
-        ui.columns(4, |columns| {
-            metric(
-                &mut columns[0],
-                "CPU · все ядра",
-                number(s.cpu_percent, "%"),
-                t,
-            );
-            metric(
-                &mut columns[1],
-                "RAM",
-                format!("{} / {}", bytes(s.memory_used), bytes(s.memory_total)),
-                t,
-            );
-            metric(
-                &mut columns[2],
-                "GPU · устройство",
-                number(s.gpu_percent, "%"),
-                t,
-            );
-            metric(
-                &mut columns[3],
-                "GPU температура",
-                number(s.gpu_temperature, " °C"),
-                t,
-            );
-        });
-        ui.label(format!(
-            "{} · VRAM {} / {} · CPU {}",
-            s.gpu_name.as_deref().unwrap_or("GPU недоступен"),
-            s.vram_used.map(bytes).unwrap_or_else(|| "—".into()),
-            s.vram_total.map(bytes).unwrap_or_else(|| "—".into()),
-            number(s.cpu_temperature, " °C")
-        ));
-        ui.label(RichText::new("FPS — успешные вызовы present выбранной swapchain; не частота монитора и не число реально показанных кадров. «—» означает отсутствие измерения.").small().color(t.muted));
+        // Include streams whose process is outside the current /proc snapshot.
+        let remaining: BTreeSet<_> = self
+            .snapshot
+            .streams
+            .iter()
+            .map(|s| s.app_key.clone())
+            .filter(|key| !covered.contains(key))
+            .collect();
+        for key in remaining {
+            ui.push_id(&key, |ui| {
+                if let Some(stream) = self.snapshot.streams.iter().find(|s| s.app_key == key) {
+                    ui.strong(&stream.name);
+                }
+                self.audio_controls(ui, &[key.clone()].into_iter().collect());
+            });
+        }
     }
-    fn mixer(&mut self, ui: &mut Ui, t: &Tokens) {
-        ui.label(&self.snapshot.audio_status);
-        ui.label(RichText::new("Звук и микрофон отключаются отдельно для приложения. Настройки применяются также к его новым потокам.").color(t.muted));
-        let mut groups: HashMap<String, Vec<_>> = HashMap::new();
-        for stream in &self.snapshot.streams {
-            groups
-                .entry(stream.app_key.clone())
-                .or_default()
-                .push(stream.clone());
-        }
-        let mut groups: Vec<_> = groups.into_iter().collect();
-        groups.sort_by(|a, b| a.1[0].name.cmp(&b.1[0].name));
-        egui::ScrollArea::vertical()
-            .max_height(ui.available_height() - 35.)
-            .show(ui, |ui| {
-                if groups.is_empty() {
-                    ui.label("Нет активных аудиопотоков");
+    fn audio_keys(&self, app: &Application) -> BTreeSet<String> {
+        self.snapshot
+            .streams
+            .iter()
+            .filter(|s| {
+                s.app_key == app.key
+                    || s.process
+                        .is_some_and(|id| app.processes.iter().any(|p| p.id == id))
+            })
+            .map(|s| s.app_key.clone())
+            .collect()
+    }
+    fn audio_controls(&self, ui: &mut Ui, keys: &BTreeSet<String>) {
+        let mut any = false;
+        for (direction, label) in [
+            (Direction::Playback, "Звук"),
+            (Direction::Capture, "Микрофон"),
+        ] {
+            let streams: Vec<_> = self
+                .snapshot
+                .streams
+                .iter()
+                .filter(|s| keys.contains(&s.app_key) && s.direction == direction)
+                .collect();
+            if streams.is_empty() {
+                continue;
+            }
+            any = true;
+            let enabled = streams.iter().all(|s| s.controllable);
+            let muted = streams.iter().all(|s| s.muted);
+            let mut volume = streams.iter().map(|s| s.volume).fold(0., f32::max);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(format!(
+                            "{label}: {}",
+                            if muted { "MUTE" } else { "ON" }
+                        )),
+                    )
+                    .on_hover_text("Отключить/включить только потоки этого приложения")
+                    .clicked()
+                {
+                    for key in streams
+                        .iter()
+                        .map(|s| s.app_key.clone())
+                        .collect::<BTreeSet<_>>()
+                    {
+                        self.send(Command::AudioMute {
+                            app: key,
+                            direction,
+                            muted: !muted,
+                        });
+                    }
                 }
-                for (key, streams) in groups {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.label(RichText::new(&streams[0].name).strong());
-                        for (direction, label) in [
-                            (Direction::Playback, "Звук"),
-                            (Direction::Capture, "Микрофон"),
-                        ] {
-                            let relevant: Vec<_> = streams
-                                .iter()
-                                .filter(|s| s.direction == direction)
-                                .collect();
-                            if relevant.is_empty() {
-                                continue;
-                            }
-                            let muted = relevant.iter().all(|s| s.muted);
-                            let enabled = relevant.iter().all(|s| s.controllable);
-                            let mut volume = relevant.iter().map(|s| s.volume).fold(0., f32::max);
-                            ui.horizontal(|ui| {
-                                ui.label(label);
-                                if ui
-                                    .add_enabled(
-                                        enabled,
-                                        egui::Button::new(if muted {
-                                            "Включить"
-                                        } else {
-                                            "Отключить"
-                                        }),
-                                    )
-                                    .clicked()
-                                {
-                                    self.send(Command::AudioMute {
-                                        app: key.clone(),
-                                        direction,
-                                        muted: !muted,
-                                    });
-                                }
-                                if ui
-                                    .add_enabled(
-                                        enabled,
-                                        egui::Slider::new(&mut volume, 0.0..=1.5).show_value(false),
-                                    )
-                                    .changed()
-                                {
-                                    self.send(Command::AudioVolume {
-                                        app: key.clone(),
-                                        direction,
-                                        volume,
-                                    });
-                                }
-                                ui.label(format!(
-                                    "{:.0}% · {} поток(а)",
-                                    volume * 100.,
-                                    relevant.len()
-                                ));
-                                if !enabled {
-                                    ui.label(RichText::new("нет writable Props").color(t.warning));
-                                }
+                ui.scope(|ui| {
+                    ui.spacing_mut().slider_width = 105.;
+                    if ui
+                        .add_enabled(
+                            enabled,
+                            egui::Slider::new(&mut volume, 0.0..=1.5).show_value(false),
+                        )
+                        .changed()
+                    {
+                        for key in streams
+                            .iter()
+                            .map(|s| s.app_key.clone())
+                            .collect::<BTreeSet<_>>()
+                        {
+                            self.send(Command::AudioVolume {
+                                app: key,
+                                direction,
+                                volume,
                             });
                         }
-                        if ui.small_button("Забыть политику").clicked() {
-                            self.send(Command::ForgetAudioPolicy { app: key });
-                        }
-                    });
+                    }
+                });
+                ui.label(format!("{:.0}%", volume * 100.));
+                if !enabled {
+                    ui.small("нет writable Props");
                 }
             });
+        }
+        if !any {
+            ui.label(RichText::new("Нет активного аудиопотока").small().weak());
+        }
     }
     fn resources(&mut self, ui: &mut Ui, t: &Tokens) {
-        ui.horizontal(|ui| {
+        ui.set_min_width(1000.);
+        ui.horizontal_wrapped(|ui| {
             ui.label("Поиск");
             ui.text_edit_singleline(&mut self.filter);
-            for (sort, label) in [
+            for (sort, title) in [
                 (Sort::Cpu, "CPU"),
                 (Sort::Memory, "RAM"),
                 (Sort::Gpu, "GPU"),
                 (Sort::Io, "I/O"),
             ] {
-                ui.selectable_value(&mut self.sort, sort, label);
+                ui.selectable_value(&mut self.sort, sort, title);
             }
             if ui
                 .add_enabled(
@@ -442,42 +601,33 @@ impl Dashboard {
             .filter(|a| a.name.to_lowercase().contains(&self.filter.to_lowercase()))
             .cloned()
             .collect();
-        let value = |a: &gamebar_core::Application| match self.sort {
-            Sort::Cpu => a.cpu_percent.unwrap_or(-1.),
-            Sort::Memory => a.memory_bytes as f64,
-            Sort::Gpu => a.gpu_percent.unwrap_or(-1.),
-            Sort::Io => a.io_bytes_per_sec.unwrap_or(-1.),
-        };
-        apps.sort_by(|a, b| value(b).total_cmp(&value(a)));
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        apps.sort_by(|a, b| sort_value(b, self.sort).total_cmp(&sort_value(a, self.sort)));
+        egui::ScrollArea::horizontal().show(ui, |ui| {
             egui::Grid::new("resources")
                 .striped(true)
-                .min_col_width(80.)
+                .min_col_width(65.)
                 .show(ui, |ui| {
-                    for text in ["Приложение", "CPU", "RAM", "GPU", "VRAM", "I/O", "Действия"]
-                    {
-                        ui.strong(text);
+                    for title in [
+                        "Приложение",
+                        "CPU",
+                        "RAM",
+                        "GPU",
+                        "VRAM",
+                        "I/O",
+                        "Звук / микрофон",
+                        "Действия",
+                    ] {
+                        ui.strong(title);
                     }
                     ui.end_row();
                     for app in apps {
-                        if ui
-                            .selectable_label(
-                                self.selected
-                                    .is_some_and(|id| app.processes.iter().any(|p| p.id == id)),
-                                &app.name,
-                            )
-                            .on_hover_text(
-                                app.processes
-                                    .iter()
-                                    .map(|p| format!("PID {} · {}", p.id.pid, p.executable))
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            )
-                            .clicked()
-                        {
-                            self.selected = app.processes.first().map(|p| p.id);
-                            self.send(Command::SelectProcess(self.selected));
-                        }
+                        ui.label(&app.name).on_hover_text(
+                            app.processes
+                                .iter()
+                                .map(|p| format!("PID {} · {}", p.id.pid, p.executable))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
                         ui.label(number(app.cpu_percent, "%"));
                         ui.label(bytes(app.memory_bytes));
                         ui.label(number(app.gpu_percent, "%"));
@@ -487,29 +637,26 @@ impl Dashboard {
                                 .map(|v| format!("{}/s", bytes(v as u64)))
                                 .unwrap_or_else(|| "—".into()),
                         );
+                        ui.push_id((&app.key, "audio"), |ui| {
+                            ui.vertical(|ui| self.audio_controls(ui, &self.audio_keys(&app)));
+                        });
                         ui.add_enabled_ui(app.processes.iter().all(|p| p.owned), |ui| {
                             ui.menu_button("Завершить…", |ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} · {} процессов",
-                                        app.name,
-                                        app.processes.len()
-                                    ))
-                                    .color(t.warning),
+                                ui.colored_label(
+                                    t.warning,
+                                    format!("{} · {} процессов", app.name, app.processes.len()),
                                 );
-                                if ui.button("SIGTERM · завершить").clicked() {
-                                    self.send(Command::Terminate {
-                                        processes: app.processes.iter().map(|p| p.id).collect(),
-                                        force: false,
-                                    });
-                                    ui.close();
-                                }
-                                if ui.button("SIGKILL · принудительно").clicked() {
-                                    self.send(Command::Terminate {
-                                        processes: app.processes.iter().map(|p| p.id).collect(),
-                                        force: true,
-                                    });
-                                    ui.close();
+                                for (force, title) in [
+                                    (false, "SIGTERM · завершить"),
+                                    (true, "SIGKILL · принудительно"),
+                                ] {
+                                    if ui.button(title).clicked() {
+                                        self.send(Command::Terminate {
+                                            processes: app.processes.iter().map(|p| p.id).collect(),
+                                            force,
+                                        });
+                                        ui.close();
+                                    }
                                 }
                             });
                         });
@@ -519,13 +666,82 @@ impl Dashboard {
         });
     }
 }
-fn metric(ui: &mut Ui, label: &str, value: String, t: &Tokens) {
-    egui::Frame::group(ui.style())
-        .fill(t.surface_raised)
-        .show(ui, |ui| {
-            ui.label(RichText::new(label).small().color(t.muted));
-            ui.label(RichText::new(value).size(25.).strong());
-        });
+fn settings_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+        })
+        .join("linux-game-bar/layout.json")
+}
+fn sort_value(a: &Application, sort: Sort) -> f64 {
+    match sort {
+        Sort::Cpu => a.cpu_percent.unwrap_or(-1.),
+        Sort::Gpu => a.gpu_percent.unwrap_or(-1.),
+        Sort::Memory => a.memory_bytes as f64,
+        Sort::Io => a.io_bytes_per_sec.unwrap_or(-1.),
+    }
+}
+fn frame_plot(ui: &mut Ui, values: &[f64], height: f32, t: &Tokens) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(120.), height),
+        egui::Sense::hover(),
+    );
+    let plot = rect.shrink2(egui::vec2(6., 15.));
+    let max = values.iter().copied().fold(16.67, f64::max) * 1.1;
+    for interval in [8.33, 16.67, 33.33] {
+        if interval >= max {
+            continue;
+        }
+        let y = plot.bottom() - (interval / max) as f32 * plot.height();
+        ui.painter().line_segment(
+            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+            egui::Stroke::new(0.5, t.muted),
+        );
+        ui.painter().text(
+            egui::pos2(plot.left() + 2., y),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{interval:.1} ms"),
+            egui::FontId::proportional(10.),
+            t.muted,
+        );
+    }
+    if values.is_empty() {
+        ui.painter().text(
+            plot.center(),
+            egui::Align2::CENTER_CENTER,
+            "Нет present-интервалов",
+            egui::FontId::proportional(12.),
+            t.muted,
+        );
+        return;
+    }
+    // Preserve spikes with a per-pixel min/max envelope rather than averaging samples away.
+    let bins = (plot.width() as usize).max(1).min(values.len());
+    let mut previous = None;
+    for i in 0..bins {
+        let slice = &values[i * values.len() / bins..(i + 1) * values.len() / bins];
+        let low = slice.iter().copied().fold(f64::INFINITY, f64::min);
+        let high = slice.iter().copied().fold(0., f64::max);
+        let x = plot.left() + i as f32 / bins.saturating_sub(1).max(1) as f32 * plot.width();
+        let point =
+            |value: f64| egui::pos2(x, plot.bottom() - (value / max) as f32 * plot.height());
+        ui.painter()
+            .line_segment([point(low), point(high)], egui::Stroke::new(1., t.accent));
+        let last = point(*slice.last().unwrap());
+        if let Some(prev) = previous {
+            ui.painter()
+                .line_segment([prev, last], egui::Stroke::new(1., t.accent));
+        }
+        previous = Some(last);
+    }
+    ui.painter().text(
+        rect.left_bottom(),
+        egui::Align2::LEFT_BOTTOM,
+        "старые → новые · каждый present",
+        egui::FontId::proportional(10.),
+        t.muted,
+    );
 }
 fn number(value: Option<f64>, unit: &str) -> String {
     value

@@ -22,13 +22,12 @@ clang 23. The workspace requires Rust 1.95+.
 - Automated unit/integration tests.
 - Opening/closing the actual overlay and screenshots/visual acceptance.
 - Audio playback/capture mute behavior, new-stream policy, server-restart acceptance.
-- Privileged eBPF verifier load, actual hot-attach/counter accuracy/overhead.
+- Counter accuracy calibration/overhead (actual verifier load/hot-attach performed later).
 - Overwatch/Vulkan gameplay and OpenGL acceptance.
 - Hyprland/Sway sessions, fullscreen focus restoration, hotplug and fractional scaling.
 
-No screenshot, FPS numbers or performance timing is claimed. Compilation is not
-proof of runtime compositor/game compatibility. Mandatory FPS coverage remains
-an **unverified experimental implementation** pending real-game checks.
+Compilation is not proof of runtime compositor/game compatibility. The later live
+diagnosis below supersedes the initial no-attach status for Overwatch/Vulkan only.
 
 The README lists unsupported capture-node fallback, persistence, namespace/driver
 matching and input/scaling limitations explicitly.
@@ -82,3 +81,29 @@ for this Overwatch session only. OpenGL remains unverified.
 Panel now prefers the root-owned system helper, captures stderr and exit status,
 and displays actionable SELinux installation diagnostics. Install script supports
 `--system-helper` with restorecon.
+
+## Movable metric widgets and persistent HUD
+
+The user confirmed FPS works, then requested simpler application/audio lists,
+AVG / 1% / 0.1% lows, individual frametimes, movable/hideable metrics and an
+Afterburner-style HUD retained in-game.
+
+Implemented:
+- Two tabs; automatic active-window target, integrated playback/capture controls
+  in the CPU/GPU-heavy application list and resources table.
+- Current FPS over 2 s; AVG/lows over up to 30 s with explicit sample count/time,
+  lows unavailable below 100/1000 intervals. Loss clears statistics; swapchain
+  changes discard earlier intervals. Frame graph uses per-present timestamps,
+  chronological samples and min/max pixel envelopes (up to 4096 samples).
+- Independently movable/resizable/hideable metric windows. Layout, theme, scale,
+  visibility, HUD enablement and background opacity saved to user config JSON.
+- Closing menu retains a transparent HUD: empty wl_surface input region and
+  layer-shell keyboard interactivity None. Menu reopens with exclusive keyboard
+  focus and a fresh layer surface. HUD disable destroys surface/GPU presentation.
+
+Compilation/formatting/clippy/release checks passed. No automated tests added/run.
+Updated user binaries and root-owned system helper installed; both transient
+systemd services restarted and report active/running without startup errors.
+The new HUD's graphical interaction, input passthrough and low-FPS accuracy have
+not received gameplay/visual acceptance; the previous working FPS counter does
+not establish those new behaviors.

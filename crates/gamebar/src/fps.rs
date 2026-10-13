@@ -23,7 +23,8 @@ pub fn request(request: &FpsRequest) -> anyhow::Result<FpsSnapshot> {
     serde_json::to_writer(&mut stream, request)?;
     stream.write_all(b"\n")?;
     let mut line = String::new();
-    BufReader::new(stream).take(65536).read_line(&mut line)?;
+    // A bounded 4096-sample frametime snapshot can exceed 64 KiB.
+    BufReader::new(stream).take(262144).read_line(&mut line)?;
     Ok(serde_json::from_str(&line)?)
 }
 

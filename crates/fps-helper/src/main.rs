@@ -32,6 +32,7 @@ struct Trace {
     started: Instant,
     last_lost: u64,
     loss_until: u64,
+    selected_chain: Option<u64>,
 }
 impl Trace {
     fn attach(uid: u32, process: ProcessId, probes: Vec<Probe>) -> Result<Self> {
@@ -130,6 +131,7 @@ impl Trace {
             started: Instant::now(),
             last_lost: 0,
             loss_until: 0,
+            selected_chain: None,
         })
     }
     fn snapshot(&mut self) -> Result<FpsSnapshot> {
@@ -137,6 +139,7 @@ impl Trace {
         unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
         let now = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
         let window = 2_000_000_000u64;
+        let statistics_window = 30_000_000_000u64;
         let lost = self
             .object
             .maps()
@@ -147,6 +150,9 @@ impl Trace {
             .unwrap_or(0);
         if lost != self.last_lost {
             self.loss_until = now + window;
+            // Never mix a gap caused by transport loss into low FPS statistics.
+            self.events.borrow_mut().clear();
+            self.started = Instant::now();
         }
         let invalid = now < self.loss_until;
         self.last_lost = lost;
@@ -154,7 +160,7 @@ impl Trace {
         for list in events.values_mut() {
             while list
                 .front()
-                .is_some_and(|t| *t < now.saturating_sub(window))
+                .is_some_and(|t| *t < now.saturating_sub(statistics_window))
             {
                 list.pop_front();
             }
@@ -166,7 +172,11 @@ impl Trace {
                 list.back()
                     .is_some_and(|time| now.saturating_sub(*time) < 500_000_000)
             })
-            .max_by_key(|(_, list)| list.len());
+            .max_by_key(|(_, list)| {
+                list.iter()
+                    .filter(|t| **t >= now.saturating_sub(window))
+                    .count()
+            });
         let mut snapshot = FpsSnapshot {
             process: Some(self.process),
             source: self.source.clone(),
@@ -174,13 +184,55 @@ impl Trace {
             status: "Waiting for successful presents…".into(),
             ..Default::default()
         };
-        if let Some((chain, list)) = best {
-            snapshot.swapchain = Some(*chain);
-            snapshot.frames = list.len() as u64;
+        if let Some((chain, _)) = best {
+            if self.selected_chain != Some(*chain) {
+                self.selected_chain = Some(*chain);
+                // A re-used/returning swapchain must not inherit earlier low statistics.
+                let chain = *chain;
+                let list = events.get_mut(&chain).unwrap();
+                while list
+                    .front()
+                    .is_some_and(|t| *t < now.saturating_sub(window))
+                {
+                    list.pop_front();
+                }
+            }
+            let chain = self.selected_chain.unwrap();
+            let list = events.get(&chain).unwrap();
+            snapshot.swapchain = Some(chain);
             if list.len() >= 2 && !invalid && self.started.elapsed() >= Duration::from_secs(2) {
                 // Cadence from actual timestamps; not callback delivery times, not monitor Hz.
                 let mut times: Vec<_> = list.iter().copied().collect();
                 times.sort_unstable();
+                let mut all_intervals: Vec<_> = times
+                    .windows(2)
+                    .map(|t| (t[1] - t[0]) as f64 / 1e6)
+                    .collect();
+                let statistics_elapsed = times.last().unwrap() - times[0];
+                snapshot.statistics_frames = all_intervals.len() as u64;
+                snapshot.statistics_seconds = statistics_elapsed as f64 / 1e9;
+                if statistics_elapsed > 0 {
+                    snapshot.avg_fps =
+                        Some(all_intervals.len() as f64 * 1e9 / statistics_elapsed as f64);
+                }
+                all_intervals.sort_by(f64::total_cmp);
+                let low = |fraction: f64, minimum: usize| {
+                    if all_intervals.len() < minimum {
+                        return None;
+                    }
+                    let count = (all_intervals.len() as f64 * fraction).ceil() as usize;
+                    let slowest = &all_intervals[all_intervals.len() - count..];
+                    let mean = slowest.iter().sum::<f64>() / count as f64;
+                    (mean > 0.).then_some(1000. / mean)
+                };
+                snapshot.low_1_fps = low(0.01, 100);
+                snapshot.low_01_fps = low(0.001, 1000);
+                let recent = times.partition_point(|t| *t < now.saturating_sub(window));
+                let times = &times[recent..];
+                snapshot.frames = times.len() as u64;
+                if times.len() < 2 {
+                    return Ok(snapshot);
+                }
                 let elapsed = times.last().unwrap() - times[0];
                 if elapsed > 0 {
                     snapshot.fps = Some((times.len() - 1) as f64 * 1e9 / elapsed as f64);
@@ -190,11 +242,14 @@ impl Trace {
                     .windows(2)
                     .map(|t| (t[1] - t[0]) as f64 / 1e6)
                     .collect();
+                snapshot.frame_times_ms =
+                    intervals[intervals.len().saturating_sub(4096)..].to_vec();
                 intervals.sort_by(f64::total_cmp);
                 snapshot.p95_ms = intervals
                     .get((intervals.len() * 95 / 100).min(intervals.len() - 1))
                     .copied();
-                snapshot.status = format!("Attached · swapchain 0x{chain:x} · 2 s window");
+                snapshot.status =
+                    format!("Attached · swapchain 0x{chain:x} · FPS 2 s / statistics up to 30 s");
             }
         }
         if invalid {
@@ -241,7 +296,15 @@ fn validate_probe(probe: &Probe, maps: &str) -> Result<()> {
     );
     let matches = maps.lines().any(|line| {
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() < 6 || !fields[1].contains('x') || fields[5] != probe.path {
+        let mut remainder = line;
+        for _ in 0..5 {
+            remainder = remainder.trim_start();
+            remainder = remainder
+                .find(char::is_whitespace)
+                .map(|i| &remainder[i..])
+                .unwrap_or("");
+        }
+        if fields.len() < 6 || !fields[1].contains('x') || remainder.trim_start() != probe.path {
             return false;
         }
         let Some((start, end)) = fields[0].split_once('-') else {
