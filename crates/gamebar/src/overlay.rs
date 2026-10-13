@@ -10,7 +10,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
     },
     shell::{
         WaylandSurface,
@@ -19,6 +19,7 @@ use smithay_client_toolkit::{
             LayerSurfaceConfigure,
         },
     },
+    shm::{Shm, ShmHandler},
 };
 use std::{
     os::fd::AsRawFd,
@@ -36,10 +37,12 @@ struct Overlay {
     outputs: OutputState,
     compositor: CompositorState,
     shell: LayerShell,
+    shm: Shm,
     gpu: Option<Gpu>,
     layer: Option<LayerSurface>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
-    pointer: Option<wl_pointer::WlPointer>,
+    pointer: Option<ThemedPointer>,
+    cursor: cursor_icon::CursorIcon,
     ctx: egui::Context,
     input: egui::RawInput,
     dashboard: Dashboard,
@@ -65,10 +68,12 @@ pub fn run(show: bool) -> anyhow::Result<()> {
         outputs: OutputState::new(&globals, &qh),
         compositor: CompositorState::bind(&globals, &qh)?,
         shell: LayerShell::bind(&globals, &qh)?,
+        shm: Shm::bind(&globals, &qh)?,
         gpu: None,
         layer: None,
         keyboard: None,
         pointer: None,
+        cursor: cursor_icon::CursorIcon::Default,
         ctx: egui::Context::default(),
         input: egui::RawInput::default(),
         dashboard: Dashboard::new(backend.commands.clone()),
@@ -119,9 +124,13 @@ pub fn run(show: bool) -> anyhow::Result<()> {
             app.dashboard.hide = false;
         }
         if app.layer.is_some() && app.configured && (app.dirty || Instant::now() >= repaint_at) {
+            app.ctx.set_zoom_factor(app.dashboard.zoom);
             app.input.screen_rect = Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(app.size[0] as f32, app.size[1] as f32),
+                egui::vec2(
+                    app.size[0] as f32 / app.dashboard.zoom,
+                    app.size[1] as f32 / app.dashboard.zoom,
+                ),
             ));
             app.input.time = Some(app.start.elapsed().as_secs_f64());
             app.input
@@ -132,6 +141,13 @@ pub fn run(show: bool) -> anyhow::Result<()> {
             let output = app
                 .ctx
                 .run_ui(app.input.take(), |root| app.dashboard.show(root));
+            let cursor = cursor_shape(output.platform_output.cursor_icon);
+            if cursor != app.cursor {
+                app.cursor = cursor;
+                if let Some(pointer) = &app.pointer {
+                    let _ = pointer.set_cursor(&conn, cursor);
+                }
+            }
             let delay = output
                 .viewport_output
                 .get(&egui::ViewportId::ROOT)
@@ -210,7 +226,9 @@ impl Overlay {
         layer.set_size(0, 0);
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        let memory = self.ctx.memory(Clone::clone);
         self.ctx = egui::Context::default();
+        self.ctx.memory_mut(|m| *m = memory);
         silver_ui_kit::typography::install(&self.ctx);
         self.gpu = Some(Gpu::new(conn, layer.wl_surface())?);
         self.scale = 1;
@@ -278,6 +296,13 @@ impl CompositorHandler for Overlay {
         surface: &wl_surface::WlSurface,
         factor: i32,
     ) {
+        if !self
+            .layer
+            .as_ref()
+            .is_some_and(|layer| layer.wl_surface() == surface)
+        {
+            return;
+        }
         self.scale = factor.max(1);
         surface.set_buffer_scale(self.scale);
         self.dirty = true;
@@ -351,7 +376,16 @@ impl SeatHandler for Overlay {
             self.keyboard = self.seats.get_keyboard(qh, &seat, None).ok();
         }
         if cap == Capability::Pointer && self.pointer.is_none() {
-            self.pointer = self.seats.get_pointer(qh, &seat).ok();
+            self.pointer = self
+                .seats
+                .get_pointer_with_theme::<_, ()>(
+                    qh,
+                    &seat,
+                    self.shm.wl_shm(),
+                    self.compositor.create_surface(qh),
+                    ThemeSpec::default(),
+                )
+                .ok();
         }
     }
     fn remove_capability(
@@ -367,9 +401,7 @@ impl SeatHandler for Overlay {
             }
         }
         if cap == Capability::Pointer {
-            if let Some(p) = self.pointer.take() {
-                p.release();
-            }
+            self.pointer.take();
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
@@ -455,7 +487,7 @@ impl KeyboardHandler for Overlay {
 impl PointerHandler for Overlay {
     fn pointer_frame(
         &mut self,
-        _: &Connection,
+        conn: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_pointer::WlPointer,
         events: &[PointerEvent],
@@ -468,9 +500,22 @@ impl PointerHandler for Overlay {
             {
                 continue;
             }
-            let pos = egui::pos2(event.position.0 as f32, event.position.1 as f32);
+            let pos = egui::pos2(
+                event.position.0 as f32 / self.dashboard.zoom,
+                event.position.1 as f32 / self.dashboard.zoom,
+            );
             match event.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                PointerEventKind::Enter { .. } => {
+                    // Never inherit the game's hidden cursor. Set our own immediately on focus.
+                    self.cursor = cursor_icon::CursorIcon::Default;
+                    if let Some(pointer) = &self.pointer {
+                        if let Err(error) = pointer.set_cursor(conn, self.cursor) {
+                            eprintln!("Cursor: {error}");
+                        }
+                    }
+                    self.input.events.push(egui::Event::PointerMoved(pos))
+                }
+                PointerEventKind::Motion { .. } => {
                     self.input.events.push(egui::Event::PointerMoved(pos))
                 }
                 PointerEventKind::Leave { .. } => self.input.events.push(egui::Event::PointerGone),
@@ -504,6 +549,31 @@ impl PointerHandler for Overlay {
             }
             self.dirty = true;
         }
+    }
+}
+impl ShmHandler for Overlay {
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm
+    }
+}
+fn cursor_shape(icon: egui::CursorIcon) -> cursor_icon::CursorIcon {
+    use cursor_icon::CursorIcon as C;
+    match icon {
+        egui::CursorIcon::PointingHand => C::Pointer,
+        egui::CursorIcon::Text => C::Text,
+        egui::CursorIcon::Grab => C::Grab,
+        egui::CursorIcon::Grabbing => C::Grabbing,
+        egui::CursorIcon::ResizeHorizontal => C::EwResize,
+        egui::CursorIcon::ResizeVertical => C::NsResize,
+        egui::CursorIcon::ResizeNeSw => C::NeswResize,
+        egui::CursorIcon::ResizeNwSe => C::NwseResize,
+        egui::CursorIcon::ResizeEast => C::EResize,
+        egui::CursorIcon::ResizeWest => C::WResize,
+        egui::CursorIcon::ResizeNorth => C::NResize,
+        egui::CursorIcon::ResizeSouth => C::SResize,
+        egui::CursorIcon::Move => C::Move,
+        egui::CursorIcon::NotAllowed => C::NotAllowed,
+        _ => C::Default,
     }
 }
 delegate_registry!(Overlay);

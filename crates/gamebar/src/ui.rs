@@ -9,6 +9,7 @@ pub struct Dashboard {
     pub selected: Option<ProcessId>,
     pub active: ActiveWindow,
     theme: Theme,
+    pub zoom: f32,
     tab: usize,
     sort: Sort,
     filter: String,
@@ -23,6 +24,7 @@ impl Dashboard {
             selected: None,
             active: ActiveWindow::default(),
             theme: Theme::default(),
+            zoom: 1.,
             tab: 0,
             sort: Sort::Cpu,
             filter: String::new(),
@@ -38,6 +40,9 @@ impl Dashboard {
     }
     pub fn select_active(&mut self, active: ActiveWindow) {
         if let Some(id) = active.pid.and_then(crate::metrics::process_id) {
+            if self.selected != Some(id) {
+                self.history.clear();
+            }
             self.selected = Some(id);
             self.send(Command::SelectProcess(Some(id)));
         }
@@ -72,12 +77,18 @@ impl Dashboard {
         let height = (rect.height() - 120.).max(260.);
         egui::Window::new("Linux Game Bar")
             .id(egui::Id::new("dashboard"))
-            .title_bar(false)
+            .title_bar(true)
             .collapsible(false)
-            .resizable(false)
-            .movable(false)
-            .fixed_pos(egui::pos2((rect.width() - width) / 2., 50.))
-            .fixed_size(egui::vec2(width, height))
+            .resizable(true)
+            .movable(true)
+            .scroll([false, true])
+            .default_pos(egui::pos2((rect.width() - width) / 2., 50.))
+            .default_size(egui::vec2(width, height.min(800.)))
+            .min_size(egui::vec2(620., 380.))
+            .max_size(egui::vec2(
+                (rect.width() - 20.).max(620.),
+                (rect.height() - 40.).max(380.),
+            ))
             .show(&ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("GAME BAR");
@@ -102,6 +113,11 @@ impl Dashboard {
                                     "Modern Dark",
                                 );
                             });
+                        ui.add(
+                            egui::Slider::new(&mut self.zoom, 0.75..=1.5)
+                                .step_by(0.05)
+                                .text("Масштаб"),
+                        );
                     });
                 });
                 ui.separator();
@@ -126,6 +142,7 @@ impl Dashboard {
             });
     }
     fn process_picker(&mut self, ui: &mut Ui) {
+        let previous = self.selected;
         let selected = self.selected.and_then(|id| {
             self.snapshot
                 .applications
@@ -155,22 +172,44 @@ impl Dashboard {
                     }
                 }
             });
+        if previous != self.selected {
+            self.history.clear();
+        }
     }
     fn performance(&mut self, ui: &mut Ui, t: &Tokens) {
+        let helper_ready = crate::fps::socket_path().exists();
         ui.horizontal(|ui| {
             self.process_picker(ui);
             if ui
-                .add_enabled(self.selected.is_some(), egui::Button::new("Подключить FPS"))
+                .add_enabled(
+                    self.selected.is_some(),
+                    egui::Button::new(if helper_ready {
+                        "Подключить FPS"
+                    } else {
+                        "Включить FPS"
+                    }),
+                )
                 .clicked()
             {
                 if let Some(id) = self.selected {
-                    self.send(Command::TraceFps(id));
+                    self.send(if helper_ready {
+                        Command::TraceFps(id)
+                    } else {
+                        Command::AuthorizeFps(id)
+                    });
+                    // Release exclusive layer keyboard focus for the system authorization dialog.
+                    if !helper_ready {
+                        self.hide = true;
+                    }
                 }
             }
             if ui.button("Отключить").clicked() {
                 self.send(Command::StopFps);
             }
         });
+        if !helper_ready {
+            ui.label(RichText::new("FPS требует отдельного helper: «Включить FPS» откроет системную авторизацию и подключится к выбранной игре.").color(t.warning));
+        }
         let app = self.selected.and_then(|id| {
             self.snapshot
                 .applications
@@ -246,6 +285,7 @@ impl Dashboard {
                     ui.painter()
                         .line_segment([prev, point], egui::Stroke::new(2., t.accent));
                 }
+                ui.painter().circle_filled(point, 1.5, t.accent);
                 previous = Some(point);
             } else {
                 previous = None;

@@ -27,6 +27,19 @@ pub fn request(request: &FpsRequest) -> anyhow::Result<FpsSnapshot> {
     Ok(serde_json::from_str(&line)?)
 }
 
+pub fn authorize() -> anyhow::Result<std::process::Child> {
+    let helper = std::env::current_exe()?.with_file_name("gamebar-fps-helper");
+    anyhow::ensure!(
+        helper.is_file(),
+        "Build/install gamebar-fps-helper beside gamebar first"
+    );
+    Ok(std::process::Command::new("pkexec")
+        .arg(helper)
+        .arg("--uid")
+        .arg(unsafe { libc::getuid() }.to_string())
+        .spawn()?)
+}
+
 pub fn discover(process: ProcessId) -> anyhow::Result<Vec<Probe>> {
     anyhow::ensure!(
         crate::metrics::process_id(process.pid) == Some(process),
@@ -35,20 +48,48 @@ pub fn discover(process: ProcessId) -> anyhow::Result<Vec<Probe>> {
     let maps = fs::read_to_string(format!("/proc/{}/maps", process.pid))?;
     let paths: HashSet<String> = maps
         .lines()
-        .filter_map(|l| l.split_whitespace().nth(5))
+        .filter_map(mapping_path)
         .filter(|p| p.starts_with('/'))
-        .map(str::to_owned)
         .collect();
     let vulkan = paths.iter().any(|p| p.contains("libvulkan"));
     if vulkan {
-        let candidates = resolve_vulkan()?;
+        // Mesa retains local ELF symbols in many custom/debug builds. Resolve the target's
+        // own ICD, not the panel's system ICD (Steam runtime/custom Mesa may differ).
+        for path in paths
+            .iter()
+            .filter(|p| p.contains("libvulkan_") || p.contains("libvulkan.so"))
+        {
+            if let Ok(offset) = symbol_offset(path, "wsi_QueuePresentKHR") {
+                return Ok(vec![Probe {
+                    path: path.clone(),
+                    offset,
+                    api: ProbeApi::Vulkan,
+                    label: "Mesa WSI QueuePresentKHR · target ICD".into(),
+                }]);
+            }
+        }
+        let candidates = resolve_vulkan().unwrap_or_default();
         let selected: Vec<_> = candidates
             .into_iter()
-            .filter(|p| paths.contains(&p.path))
+            .filter_map(|mut probe| {
+                // Namespace path names can differ; only accept the exact same device+inode.
+                use std::os::unix::fs::MetadataExt;
+                let source = fs::metadata(&probe.path).ok()?;
+                let target = paths.iter().find(|path| {
+                    fs::metadata(path)
+                        .is_ok_and(|m| m.dev() == source.dev() && m.ino() == source.ino())
+                })?;
+                probe.path = target.clone();
+                Some(probe)
+            })
             .collect();
         if !selected.is_empty() {
             return Ok(selected);
         }
+        anyhow::bail!(
+            "Vulkan ICD выбранного процесса не совпадает с драйвером панели, символ WSI не найден. PID {}. Не переключаюсь на GLX: игра использует Vulkan.",
+            process.pid
+        );
     }
     for (pattern, symbol, api) in [
         ("libEGL", "eglSwapBuffers", ProbeApi::Egl),
@@ -70,6 +111,16 @@ pub fn discover(process: ProcessId) -> anyhow::Result<Vec<Probe>> {
         "No supported present dispatch found in PID {} (Vulkan driver mapping / EGL / GLX)",
         process.pid
     )
+}
+fn mapping_path(line: &str) -> Option<String> {
+    let mut rest = line;
+    for _ in 0..5 {
+        rest = rest.trim_start();
+        let end = rest.find(char::is_whitespace)?;
+        rest = &rest[end..];
+    }
+    let path = rest.trim_start();
+    (!path.is_empty()).then(|| path.to_owned())
 }
 fn symbol_offset(path: &str, symbol: &str) -> anyhow::Result<u64> {
     let data = fs::read(path)?;

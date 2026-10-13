@@ -32,3 +32,27 @@ an **unverified experimental implementation** pending real-game checks.
 
 The README lists unsupported capture-node fallback, persistence, namespace/driver
 matching and input/scaling limitations explicitly.
+
+## User-reported Overwatch issues and follow-up
+
+User opened the overlay in Overwatch and reported missing FPS, immovable/fixed-size
+panel, and reluctant/invisible cursor. Investigation found no FPS helper running
+(user confirmed authorization was never started), fixed window geometry in code,
+and no Wayland cursor installation. The game uses a custom Mesa ICD different from
+the system ICD, inside Steam's runtime.
+
+Changes: in-panel helper authorization + attach, automatic attachment on selection
+when helper exists; resolve target ICD's Mesa WSI symbol; draggable/resizable panel,
+UI zoom and geometry retained across hide/show; SCT themed cursor on pointer enter
+and egui cursor-shape updates.
+
+`gamebar fps-probes 88141` resolved the running Overwatch ICD to
+`mesa-overwatch/26.3.0-devel-5c80eda3/lib/libvulkan_radeon.so`, file offset `0x1fdde0`
+(`wsi_QueuePresentKHR`). This is resolution evidence, **not a measured FPS claim**.
+Privileged attach still requires user authorization; FPS counts, resize interaction
+and cursor behavior remain awaiting user confirmation after update.
+
+Updated binaries installed and the old panel shut down through control IPC.
+New panel started as transient user `linux-game-bar.service`; systemd reports
+active/running, with no startup errors in its journal. The game was left running.
+This confirms daemon startup only, not graphical interactions or FPS accuracy.

@@ -133,6 +133,7 @@ pub enum Command {
     },
     SelectProcess(Option<ProcessId>),
     TraceFps(ProcessId),
+    AuthorizeFps(ProcessId),
     StopFps,
     Terminate {
         processes: Vec<ProcessId>,

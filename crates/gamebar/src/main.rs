@@ -15,18 +15,35 @@ fn main() -> anyhow::Result<()> {
         "toggle" | "show" | "hide" | "quit" => ipc::connect(&args[1]),
         "run" => overlay::run(args.iter().any(|a| a == "--show")),
         "enable-fps" => {
-            let helper = std::env::current_exe()?.with_file_name("gamebar-fps-helper");
-            anyhow::ensure!(
-                helper.is_file(),
-                "Build/install gamebar-fps-helper beside gamebar first"
-            );
-            let uid = unsafe { libc::getuid() };
-            let status = std::process::Command::new("pkexec")
-                .arg(helper)
-                .arg("--uid")
-                .arg(uid.to_string())
-                .spawn()?;
+            let status = fps::authorize()?;
             println!("FPS helper authorization started (PID {})", status.id());
+            Ok(())
+        }
+        "fps-probes" | "trace-fps" => {
+            let pid = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("Specify PID"))?
+                .parse()?;
+            let process =
+                metrics::process_id(pid).ok_or_else(|| anyhow::anyhow!("Process not found"))?;
+            let probes = fps::discover(process)?;
+            if args[1] == "fps-probes" {
+                println!("{}", serde_json::to_string_pretty(&probes)?);
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fps::request(
+                        &gamebar_core::FpsRequest::Attach { process, probes }
+                    )?)?
+                );
+            }
+            Ok(())
+        }
+        "fps-status" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&fps::request(&gamebar_core::FpsRequest::Status)?)?
+            );
             Ok(())
         }
         "help" | "--help" | "-h" => {

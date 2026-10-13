@@ -1221,6 +1221,7 @@ dependencies = [
  "anyhow",
  "ash",
  "crossbeam-channel",
+ "cursor-icon",
  "egui",
  "egui-wgpu",
  "egui_extras",

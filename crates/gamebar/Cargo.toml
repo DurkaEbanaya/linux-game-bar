@@ -23,6 +23,7 @@ silver-ui-kit.workspace = true
 smithay-client-toolkit = "0.21.1"
 wayland-client = { version = "0.31", features = ["system"] }
 raw-window-handle = "0.6"
+cursor-icon = "1"
 pollster = "0.4"
 crossbeam-channel = "0.5"
 pipewire = "0.9"

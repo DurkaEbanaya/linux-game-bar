@@ -29,6 +29,8 @@ impl Backend {
                 let mut next_sample = Instant::now();
                 let mut tracing = false;
                 let mut sent_revision = None;
+                let mut authorization:Option<(std::process::Child,gamebar_core::ProcessId,Instant)>=None;
+                snapshot.fps.status="FPS не подключён. Выберите игру и нажмите «Включить FPS»; потребуется авторизация helper.".into();
                 loop {
                     if let Ok(command) = rx.recv_timeout(Duration::from_millis(100)) {
                         let result: anyhow::Result<()> = match command {
@@ -44,6 +46,13 @@ impl Backend {
                             }
                             Command::SelectProcess(id) => {
                                 sampler.selected = id;
+                                if let Some(process)=id && snapshot.fps.process!=Some(process) && fps::socket_path().exists() {
+                                    let _=fps::request(&FpsRequest::Detach);tracing=false;
+                                    match fps::discover(process).and_then(|probes|fps::request(&FpsRequest::Attach {process,probes})) {
+                                        Ok(value)=>{tracing=value.process.is_some();snapshot.fps=value;}
+                                        Err(error)=>{snapshot.fps=gamebar_core::FpsSnapshot {status:error.to_string(),..Default::default()};}
+                                    }
+                                }
                                 Ok(())
                             }
                             Command::TraceFps(process) => {
@@ -68,7 +77,16 @@ impl Backend {
                                     }
                                 }
                             }
+                            Command::AuthorizeFps(process)=>{
+                                if authorization.is_some() {Ok(())}else {
+                                    fps::authorize().map(|child| {
+                                        authorization=Some((child,process,Instant::now()));
+                                        snapshot.fps.status="Ожидание авторизации FPS-helper…".into();
+                                    })
+                                }
+                            }
                             Command::StopFps => {
+                                if let Some((mut child,_,_))=authorization.take() {let _=child.kill();let _=child.wait();}
                                 tracing = false;
                                 fps::request(&FpsRequest::Detach).map(|v| snapshot.fps = v)
                             }
@@ -81,6 +99,21 @@ impl Backend {
                             snapshot.errors.push(error.to_string());
                         }
                         snapshot.revision += 1;
+                    }
+                    if let Some((child,process,started))=authorization.as_mut() {
+                        let ready=std::os::unix::net::UnixStream::connect(fps::socket_path()).is_ok();
+                        if ready {
+                            let target=*process;
+                            authorization=None;
+                            match fps::discover(target).and_then(|probes|fps::request(&FpsRequest::Attach {process:target,probes})) {
+                                Ok(value)=>{tracing=value.process.is_some();snapshot.fps=value;}
+                                Err(error)=>{snapshot.fps=gamebar_core::FpsSnapshot {status:error.to_string(),..Default::default()};}
+                            }
+                            snapshot.revision+=1;
+                        }else if started.elapsed()>Duration::from_secs(120) || child.try_wait().ok().flatten().is_some() {
+                            snapshot.fps.status="FPS-helper не запущен: авторизация отменена или завершилась ошибкой. Нажмите «Включить FPS» повторно.".into();
+                            authorization=None;snapshot.revision+=1;
+                        }
                     }
                     if let Ok(update) = updates_rx.try_recv() {
                         snapshot.streams = update.streams;
