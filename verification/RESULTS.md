@@ -153,3 +153,18 @@ Final fmt/check/clippy/release build and shell syntax checks passed. Updated pan
 and system helper installed. Panel user service active/running with no startup
 errors. KDE KGlobalAccel reports HUD action bound to Qt key 301989959
 (Meta+Shift+G); this verifies registration, not keyboard gameplay acceptance.
+
+## v0.1.1 missing Frametime diagnosis
+
+The user reported no Frametime graph. Saved layout shows FrameTime visible=true,
+on-screen at (19,221). Live helper response returned valid FPS/frame intervals but
+zero timestamps/sample time. Root process PID 99434 was still an older executable
+(`readlink /proc/PID/exe`: system helper "(deleted)"); the earlier systemd helper
+launch exited because that older pkexec helper already owned the socket.
+
+Stopped the actual old process, installed/restarted current system helper, and
+hot-attached to Overwatch PID 88141. Live response: FPS 193.02836796185963,
+385 intervals and 385 matching monotonic timestamps, lost=0. Panel restarted.
+Added explicit old-helper warning inside Frametime instead of silent blank plot;
+documented helper restart during upgrade. Workspace version now 0.1.1.
+Fmt/check/clippy/release build passed; no automated tests or visual acceptance run.

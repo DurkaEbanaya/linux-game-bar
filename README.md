@@ -5,7 +5,7 @@ Rust, Smithay Client Toolkit, egui 0.36 и wgpu 30. Дизайн адаптир�
 `rust-gui-silver-bullet`: Pro Dark / Studio Light / Modern Dark, Painter-иконки,
 локальные шрифты с кириллицей.
 
-**Первый публичный релиз: v0.1.0.**
+**Текущий релиз: v0.1.1.**
 Сборка проходит на openSUSE Tumbleweed; FPS hot-attach работает в живой сессии Overwatch.
 Автоматизированные тесты по просьбе автора не запускаются. [Точный статус](verification/RESULTS.md).
 
@@ -61,7 +61,7 @@ Rust, Smithay Client Toolkit, egui 0.36 и wgpu 30. Дизайн адаптир�
 
 ## Готовый релиз
 
-Скачайте архив `linux-game-bar-0.1.0-linux-x86_64.tar.gz` со страницы
+Скачайте архив `linux-game-bar-0.1.1-linux-x86_64.tar.gz` со страницы
 [Releases](https://github.com/DurkaEbanaya/linux-game-bar/releases), распакуйте и запустите:
 
 ```sh
@@ -73,6 +73,12 @@ bash scripts/install.sh --system-helper
 нужны совместимые glibc, libxkbcommon, PipeWire, libbpf 1.x, libelf/zlib и Vulkan/Wayland.
 Для более старых дистрибутивов используйте сборку из исходников ниже.
 Рядом опубликованы SHA-256 и полный исходный архив соответствующего релиза.
+После обновления остановите старый FPS-helper и заново включите FPS: замена
+бинарника на диске не обновляет уже работающий процесс. Для helper в transient
+service: `sudo systemctl stop linux-game-bar-fps`; для запущенного через pkexec —
+`sudo pkill -x gamebar-fps-hel` (имя процесса Linux ограничено 15 символами).
+Затем «Включить FPS» в панели. Старый helper без timestamps теперь явно отмечается
+в виджете Frametime вместо молча пустого графика.
 
 ## Сборка
 

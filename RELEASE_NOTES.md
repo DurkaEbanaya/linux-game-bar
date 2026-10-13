@@ -1,6 +1,8 @@
-# Linux Game Bar v0.1.0
+# Linux Game Bar v0.1.1
 
-Первый публичный релиз нативной игровой панели для Linux Wayland.
+Исправление пропавшего frametime после обновления v0.1.0: обнаружение старого
+работающего FPS-helper без timestamps и явная инструкция в виджете. При обновлении
+нужно перезапустить helper, а не только заменить бинарник. См. README.
 
 ## Возможности
 
@@ -14,7 +16,7 @@
 
 ## Установка
 
-Распакуйте `linux-game-bar-0.1.0-linux-x86_64.tar.gz`, затем:
+Распакуйте `linux-game-bar-0.1.1-linux-x86_64.tar.gz`, затем:
 
 ```sh
 bash scripts/install.sh --system-helper

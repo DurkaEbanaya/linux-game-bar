@@ -66,6 +66,7 @@ struct WidgetReading {
     intervals: Vec<(f64, f64)>,
     frame_ms: Option<f64>,
     p95_ms: Option<f64>,
+    graph_status: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -657,6 +658,20 @@ impl Dashboard {
                 intervals: self.frame_history.iter().copied().collect(),
                 frame_ms: fps.and_then(|f| f.frame_ms),
                 p95_ms: fps.and_then(|f| f.p95_ms),
+                graph_status: fps.and_then(|f| {
+                    if !f.frame_times_ms.is_empty()
+                        && f.frame_timestamps_ns.len() != f.frame_times_ms.len()
+                    {
+                        Some(
+                            "Запущен старый FPS-helper: перезапустите helper после обновления"
+                                .into(),
+                        )
+                    } else if f.fps.is_none() {
+                        Some(f.status.clone())
+                    } else {
+                        None
+                    }
+                }),
                 ..Default::default()
             };
         }
@@ -1029,6 +1044,9 @@ fn widget_content(
             number(reading.frame_ms, " ms"),
             number(reading.p95_ms, " ms")
         ));
+        if let Some(status) = &reading.graph_status {
+            ui.colored_label(t.warning, status);
+        }
         let height = if hud {
             height - 60.
         } else {
